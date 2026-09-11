@@ -1,0 +1,16 @@
+# On-device config: Nexigo USB webcam + QNN (Hexagon NPU) pose backend.
+# The `qnn` backend is a stub until the milestone-1 NPU spike lands --
+# see docs/hardware.md and scripts/qnn_spike.md.
+capture:
+  source: "0"  # Nexigo webcam as /dev/video0; adjust if other capture devices are present
+  width: 1280
+  height: 720
+  fps: 30
+
+inference:
+  backend: qnn
+  model_dir: models/qcs6490
+
+overlay:
+  show_window: true
+  window_name: "Pose-Controller (Q6A)"

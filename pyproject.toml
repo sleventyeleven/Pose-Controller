@@ -1,0 +1,34 @@
+[project]
+name = "pose-controller"
+version = "0.1.0"
+description = "Offline, on-device pose/position-triggered media control (Qualcomm NPU MVP)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "opencv-python>=4.9",
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+    "scipy>=1.11",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mediapipe>=0.10",
+    "pytest>=8.0",
+]
+qnn = [
+    "qai-hub-models",
+]
+
+[project.scripts]
+pose-controller = "pose_controller.app:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,13 @@
+# Dev-loop config: laptop webcam + CPU (MediaPipe) pose backend.
+capture:
+  source: "0"
+  width: 1280
+  height: 720
+  fps: 30
+
+inference:
+  backend: cpu
+
+overlay:
+  show_window: true
+  window_name: "Pose-Controller (dev)"
