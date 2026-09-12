@@ -13,9 +13,9 @@
 
 | Camera | Interface | Status |
 |---|---|---|
-| Nexigo 1080p webcam | USB (UVC) | **Used for the first working pipeline.** Standard V4L2/OpenCV capture, no driver risk on an unfamiliar board. |
-| Radxa Camera 4K (Sony IMX415) | MIPI CSI | Radxa's own product page lists compatibility with ROCK-series boards only (ROCK 3A/5A/5B/5C/5T, CM4/CM5 IO boards, etc.) -- the Dragon Q6A/Q8B are **not** in that list. CSI connector/driver compatibility with the Dragon series is unconfirmed. Defer until the USB pipeline is proven, then verify the physical connector and required kernel driver before relying on it. |
-| ArduCam v2 8MP | MIPI CSI | Same unconfirmed-compatibility caveat as the Radxa Camera 4K. |
+| Nexigo 1080p webcam | USB (UVC) | **Working.** Confirmed via `v4l2-ctl --list-devices` on the Q6A: enumerates as `/dev/video0`/`/dev/video1` with no extra setup. Used for the first working pipeline. |
+| Radxa Camera 4K (Sony IMX415) | MIPI CSI | **Supported, but needs an overlay enabled -- not on by default.** Radxa's product page only lists ROCK-series boards, but the Q6A image ships a `radxa-overlays` DKMS package with device-tree overlays specifically for it: `qcs6490-radxa-dragon-q6a-cam2-radxa-camera-8m-219.dtbo` and the `cam3` equivalent (an unrelated `cam1-imx577` overlay exists too, for a different sensor -- not this camera). On a fresh image `dmesg` shows zero CSI/CamSS probing at all until the matching overlay is enabled. Enable via `sudo rsetup` (Hardware > Overlays, or whatever the current menu path is) for the CSI port the camera is physically plugged into, then reboot -- `rsetup`'s overlay pipeline is interactive/menu-driven and not safe to script blindly over SSH. Re-check with `v4l2-ctl --list-devices` and `dmesg | grep -i camss` after reboot. |
+| ArduCam v2 8MP | MIPI CSI | Not yet tested; no matching overlay found in the `radxa-overlays` package during the Radxa Camera 4K investigation above -- likely needs its own overlay/driver, unconfirmed. |
 
 ## NPU / QNN spike (milestone 1, not yet done)
 

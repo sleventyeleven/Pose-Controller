@@ -16,8 +16,18 @@ dev = [
     "mediapipe>=0.10",
     "pytest>=8.0",
 ]
-qnn = [
-    "qai-hub-models",
+# Dev-machine only -- pulls in PyTorch to export/quantize models via
+# Qualcomm AI Hub's cloud compile service. Never install on the Q6A itself
+# (see docs/storage-footprint.md); the device only needs the compiled QNN
+# artifacts (models/) plus the `device` extra below.
+hub = [
+    "qai_hub_models",
+]
+# Q6A-only -- the actual NPU runtime for inference/backends/qnn.py. ~261MB
+# installed (see docs/storage-footprint.md) -- large, but replaces a
+# subprocess-per-frame approach that was ~150x slower (scripts/qnn_spike.md).
+device = [
+    "onnxruntime-qnn",
 ]
 
 [project.scripts]

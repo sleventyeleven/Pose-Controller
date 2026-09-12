@@ -11,7 +11,7 @@ def test_dev_laptop_config_loads():
 def test_dragon_q6a_config_loads():
     config = AppConfig.from_yaml("configs/dragon_q6a.yaml")
     assert config.inference.backend == "qnn"
-    assert config.inference.model_dir == "models/qcs6490"
+    assert config.inference.model_dir == "models/mediapipe_pose_qcs6490"
 
 
 def test_defaults_when_sections_missing(tmp_path):
