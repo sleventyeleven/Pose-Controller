@@ -1,0 +1,23 @@
+# On-device config: Nexigo USB webcam + YOLO26-Pose (Hexagon NPU) backend
+# -- Radxa Dragon Q8B (SC8280XP).
+#
+# Identical pipeline to configs/dragon_q6a_yolo26.yaml -- the exported
+# model (models/yolo26n_pose_qcs6490/, Ultralytics QNN export targeting
+# QCS6490's real soc_model, see that dir's README.md) is confirmed running
+# on this board's real Hexagon NPU unmodified. Only `overlay.window_name`
+# differs from the Q6A config. See docs/setup-q8b.md for board bring-up
+# and docs/backlog.md for this alternate pipeline's real-footage
+# validation results (single-person only so far).
+capture:
+  source: "0"  # Nexigo webcam as /dev/video0 once moved over from the Q6A; adjust if other capture devices are present
+  width: 1280
+  height: 720
+  fps: 30
+
+inference:
+  backend: yolo26
+  yolo26_model_dir: models/yolo26n_pose_qcs6490
+
+overlay:
+  show_window: true
+  window_name: "Pose-Controller (Q8B, YOLO26-Pose)"

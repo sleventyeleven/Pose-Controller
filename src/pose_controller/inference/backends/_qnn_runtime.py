@@ -18,6 +18,28 @@ def _ensure_qnn_registered() -> None:
         _qnn_registered = True
 
 
+def create_qnn_session(onnx_path: str) -> ort.InferenceSession:
+    """Load `onnx_path` (an AI-Hub- or Ultralytics-QNN-exported model) into
+    a persistent `onnxruntime.InferenceSession` bound to the Hexagon NPU via
+    the QNN execution provider -- the `add_provider_for_devices` dance
+    below is required for this "plugin execution provider" mechanism (the
+    plain `providers=[...]` argument doesn't recognize it), see
+    scripts/qnn_spike.md. Shared by `OnnxQnnRunner` (AI-Hub models: opaque
+    uint8 I/O needing manual `QuantSpec` quantize/dequantize) and any
+    caller whose model already handles quantization inside its own graph
+    (e.g. Ultralytics' QNN export, which wraps its EPContext node in
+    explicit QuantizeLinear/DequantizeLinear nodes and exposes plain
+    float32 I/O -- see `yolo26_qnn.py`)."""
+    _ensure_qnn_registered()
+    qnn_devices = [d for d in ort.get_ep_devices() if d.ep_name == "QNNExecutionProvider"]
+    if not qnn_devices:
+        raise RuntimeError("No QNNExecutionProvider device found by onnxruntime")
+
+    session_options = ort.SessionOptions()
+    session_options.add_provider_for_devices(qnn_devices, {"backend_path": oq.get_qnn_htp_path()})
+    return ort.InferenceSession(onnx_path, sess_options=session_options, providers=[])
+
+
 @dataclass(frozen=True)
 class QuantSpec:
     """Scale/offset for one QNN-quantized uint8 tensor: real = (raw +
@@ -63,16 +85,7 @@ class OnnxQnnRunner:
         input_quant: QuantSpec,
         output_quant: dict[str, QuantSpec],
     ):
-        _ensure_qnn_registered()
-        qnn_devices = [d for d in ort.get_ep_devices() if d.ep_name == "QNNExecutionProvider"]
-        if not qnn_devices:
-            raise RuntimeError("No QNNExecutionProvider device found by onnxruntime")
-
-        session_options = ort.SessionOptions()
-        session_options.add_provider_for_devices(
-            qnn_devices, {"backend_path": oq.get_qnn_htp_path()}
-        )
-        self._session = ort.InferenceSession(onnx_path, sess_options=session_options, providers=[])
+        self._session = create_qnn_session(onnx_path)
         self._input_name = self._session.get_inputs()[0].name
         self._input_quant = input_quant
         self._output_names = [o.name for o in self._session.get_outputs()]

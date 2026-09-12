@@ -1,0 +1,27 @@
+# On-device config: Nexigo USB webcam + YOLOv8n-det + HRNetPose (Hexagon
+# NPU) backend.
+#
+# This is a second *alternate* pipeline being A/B tested against
+# configs/dragon_q6a.yaml's current default (YOLOv8n-det + BlazePose-
+# landmark) -- not a replacement, and a separate evaluation from
+# configs/dragon_q6a_yolo26.yaml's fully end-to-end YOLO26-Pose. HRNetPose
+# only replaces the landmark stage; the same YOLOv8n-det first stage is
+# reused (detector_model_dir below). Same tracking/gesture/overlay config
+# as the other two, only `inference.backend` differs, so a side-by-side
+# comparison is a `--config` swap and nothing else. See docs/journey.md
+# and docs/backlog.md for why this alternate is being evaluated, and
+# models/hrnet_pose_qcs6490/README.md for the model itself.
+capture:
+  source: "0"  # Nexigo webcam as /dev/video0; adjust if other capture devices are present
+  width: 1280
+  height: 720
+  fps: 30
+
+inference:
+  backend: hrnet
+  hrnet_model_dir: models/hrnet_pose_qcs6490
+  detector_model_dir: models/yolov8n_det_qcs6490
+
+overlay:
+  show_window: true
+  window_name: "Pose-Controller (Q6A, HRNetPose)"

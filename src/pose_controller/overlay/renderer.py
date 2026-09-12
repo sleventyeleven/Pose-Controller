@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 
 from pose_controller.gestures.types import ArmPose
+from pose_controller.inference.backends._yolo26_detect import Detection
 from pose_controller.inference.pose import PoseResult
 
 # Upper-body-focused skeleton edges (MediaPipe Pose landmark indices).
@@ -91,6 +92,34 @@ def _draw_one(
         frame_bgr, label, (origin[0], max(origin[1] - 20, 20)),
         cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA,
     )
+
+
+_DETECTION_BOX_COLOR = (180, 180, 180)  # neutral gray -- visually distinct from per-track pose colors
+
+
+def draw_detections(frame_bgr: np.ndarray, detections: list[Detection]) -> np.ndarray:
+    """Draw general object-detection boxes (from
+    `inference.backends._yolo26_detect.detect_objects`, e.g. the
+    dashboard's optional detect-overlay -- see `docs/backlog.md`) on top
+    of `frame_bgr` in place, returning it for chaining.
+
+    Deliberately visually distinct from `draw_poses`' per-track colored
+    skeletons (thin neutral-gray boxes with a small class+score label,
+    no track_id) -- this is a *different* signal: "what does a general
+    object detector see in this frame" rather than "who is being
+    tracked as a person." Not wired into gesture recognition or tracking
+    at all; this is purely a visualization/diagnostic layer, staged for
+    future scene-context reasoning (see `_yolo26_detect.py`'s module
+    docstring)."""
+    for det in detections:
+        x1, y1, x2, y2 = (int(v) for v in det.box_xyxy)
+        cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), _DETECTION_BOX_COLOR, 1)
+        label = f"{det.class_name} {det.score:.2f}"
+        cv2.putText(
+            frame_bgr, label, (x1, max(y1 - 6, 12)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, _DETECTION_BOX_COLOR, 1, cv2.LINE_AA,
+        )
+    return frame_bgr
 
 
 def draw_action_banner(frame_bgr: np.ndarray, text: str | None) -> np.ndarray:

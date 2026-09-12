@@ -1,0 +1,22 @@
+# On-device config: Nexigo USB webcam + YOLO26-Pose (Hexagon NPU) backend.
+#
+# This is the *alternate* pipeline being A/B tested against
+# configs/dragon_q6a.yaml's current default (YOLOv8n-det + BlazePose-
+# landmark) -- not a replacement. Same tracking/gesture/overlay config,
+# only `inference.backend` differs, so a side-by-side comparison is a
+# `--config` swap and nothing else. See docs/journey.md and
+# docs/backlog.md for why this alternate is being evaluated, and
+# models/yolo26n_pose_qcs6490/README.md for the model itself.
+capture:
+  source: "0"  # Nexigo webcam as /dev/video0; adjust if other capture devices are present
+  width: 1280
+  height: 720
+  fps: 30
+
+inference:
+  backend: yolo26
+  yolo26_model_dir: models/yolo26n_pose_qcs6490
+
+overlay:
+  show_window: true
+  window_name: "Pose-Controller (Q6A, YOLO26-Pose)"

@@ -139,6 +139,20 @@ def _greedy_nms(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float) -> 
     return keep
 
 
+def _cxcywh_to_xyxy(boxes_cxcywh: np.ndarray) -> np.ndarray:
+    """Convert `[N, 4]` boxes from (center-x, center-y, width, height) --
+    Ultralytics' own head-decode output format (see
+    `ultralytics.nn.modules.head.Detect._get_decode_boxes`, confirmed from
+    source, not assumed) -- to `[N, 4]` xyxy, the format every NMS/box
+    consumer in this project already expects. Used by the raw-output
+    decode for Ultralytics-QNN-exported models (`_yolo26_pose.py`,
+    `_yolo26_detect.py`) -- AI-Hub-exported models decode boxes to xyxy
+    inside their own graph already, so they never needed this."""
+    cx, cy, w, h = boxes_cxcywh[:, 0], boxes_cxcywh[:, 1], boxes_cxcywh[:, 2], boxes_cxcywh[:, 3]
+    half_w, half_h = w / 2, h / 2
+    return np.stack([cx - half_w, cy - half_h, cx + half_w, cy + half_h], axis=1)
+
+
 def _select_detections(
     box_coords_flat: np.ndarray,
     box_scores_flat: np.ndarray,

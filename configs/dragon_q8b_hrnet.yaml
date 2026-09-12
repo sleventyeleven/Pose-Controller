@@ -1,0 +1,21 @@
+# On-device config: Nexigo USB webcam + YOLOv8n-det + HRNetPose (Hexagon
+# NPU) backend -- Radxa Dragon Q8B (SC8280XP).
+#
+# Identical pipeline to configs/dragon_q6a_hrnet.yaml -- models/
+# hrnet_pose_qcs6490/ is confirmed running on this board's real Hexagon
+# NPU unmodified. Only `overlay.window_name` differs from the Q6A config.
+# See docs/setup-q8b.md for board bring-up.
+capture:
+  source: "0"  # Nexigo webcam as /dev/video0 once moved over from the Q6A; adjust if other capture devices are present
+  width: 1280
+  height: 720
+  fps: 30
+
+inference:
+  backend: hrnet
+  hrnet_model_dir: models/hrnet_pose_qcs6490
+  detector_model_dir: models/yolov8n_det_qcs6490
+
+overlay:
+  show_window: true
+  window_name: "Pose-Controller (Q8B, HRNetPose)"

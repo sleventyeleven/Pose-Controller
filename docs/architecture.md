@@ -41,6 +41,43 @@ the Q6A:
     confidence) and against real captured frames -- still an active
     tuning area for landmark confidence on some real-world crops, see
     `docs/backlog.md`.
+  - `yolo26_qnn.py` -- `Yolo26PoseEstimator`, an *alternate* on-device
+    pipeline being evaluated alongside `QnnPoseEstimator`, not replacing
+    it (`inference.backend: yolo26` vs `qnn` -- see
+    `configs/dragon_q6a_yolo26.yaml`). A single end-to-end model
+    (YOLO26-Pose) does person detection *and* 17-keypoint estimation in
+    one forward pass, instead of two separate models with a manual
+    crop/ROI step in between. Built to test whether that eliminates two
+    specific, already-diagnosed weak points in the two-stage pipeline:
+    the crop-margin step's own tuning fragility, and BlazePose's
+    landmark model gating its entire output behind one scalar confidence
+    (a real candidate for the "only registers gestures facing the
+    camera" symptom found in live testing). `_yolo26_pose.py` maps
+    COCO's 17-keypoint schema onto this project's `Landmark` enum, so
+    `Tracker`, `GestureStateMachine`, and `overlay/` all work completely
+    unchanged regardless of which pipeline is selected. The compiled
+    model comes from Ultralytics' own local QNN export, not Qualcomm AI
+    Hub (whose cloud compiler failed on this model -- see
+    `docs/backlog.md`); its raw, non-post-processed output means
+    `_yolo26_pose.py` also carries a `decode_raw_output` step (box-format
+    conversion + channel splitting) ahead of the same score-filter+NMS
+    logic used for the AI-Hub-style contract. Confirmed running on a
+    real Hexagon v68 NPU (Q8B); not yet run against real camera footage
+    or on the Q6A directly -- see `docs/backlog.md` for status.
+  - `hrnet_qnn.py` -- `HrnetPoseEstimator`, a second *alternate* landmark
+    stage (`inference.backend: hrnet` -- see
+    `configs/dragon_q6a_hrnet.yaml`), reusing the same YOLOv8n-det first
+    stage as `QnnPoseEstimator` but replacing BlazePose's landmark model
+    with HRNetPose. Unlike YOLO26-Pose, this stays a two-stage design --
+    evaluated specifically because it uses the same `w8a8` quantization
+    path proven for every other model here, where YOLO26 (`w8a16`) hit a
+    reproducible QNN compile failure on this chipset (see
+    `docs/backlog.md`). `_hrnet_pose.py` decodes its heatmap output
+    (64x48x17, one confidence map per COCO keypoint) via per-keypoint
+    argmax and reuses `_yolo26_pose.py`'s COCO->`Landmark` mapping, so
+    again every downstream consumer is unchanged. Compiled and profiled
+    successfully on a real device; not yet validated on the physical Q6A
+    -- see `docs/backlog.md` for status.
 - **tracking/** -- `Tracker.update(detections, frame_bgr) -> detections`
   (with `track_id` populated). Two layers:
   - Position/motion (always on): a constant-velocity Kalman filter per

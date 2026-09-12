@@ -25,9 +25,15 @@ dev = [
 # Dev-machine only -- pulls in PyTorch to export/quantize models via
 # Qualcomm AI Hub's cloud compile service. Never install on the Q6A itself
 # (see docs/storage-footprint.md); the device only needs the compiled QNN
-# artifacts (models/) plus the `device` extra below.
+# artifacts (models/) plus the `device` extra below. `ultralytics` is a
+# separate, fully-local export path (no Qualcomm account needed) used for
+# the yolo26 models specifically -- AI Hub's own export failed to compile
+# them ("exit code 14"), Ultralytics' own QNN export
+# (https://docs.ultralytics.com/integrations/qnn) succeeded where AI Hub
+# did not, see docs/backlog.md.
 hub = [
     "qai_hub_models",
+    "ultralytics",
 ]
 # Q6A-only -- the actual NPU runtime for inference/backends/qnn.py. ~261MB
 # installed (see docs/storage-footprint.md) -- large, but replaces a

@@ -16,6 +16,13 @@ class CaptureConfig:
 
 @dataclass
 class InferenceConfig:
+    # "cpu" (dev-loop MediaPipe), "qnn" (on-device YOLOv8n-det +
+    # BlazePose-landmark, the current default pipeline), "yolo26"
+    # (on-device YOLO26-Pose, a single end-to-end detection+keypoints
+    # model), or "hrnet" (on-device YOLOv8n-det + HRNetPose-landmark, a
+    # second landmark-stage alternative to BlazePose) -- "yolo26" and
+    # "hrnet" are both being evaluated *alongside* "qnn", not replacing it
+    # -- see docs/journey.md and docs/backlog.md for why.
     backend: str = "cpu"
     model_dir: str = "models"
     # First-stage person detector for the qnn backend (see
@@ -23,6 +30,19 @@ class InferenceConfig:
     # 128x128 detector, which was found to lose small/distant subjects at
     # ordinary room camera-to-subject distance -- see scripts/qnn_spike.md.
     detector_model_dir: str = "models/yolov8n_det_qcs6490"
+    # Model dir for the yolo26 backend (inference/backends/yolo26_qnn.py).
+    # Sourced from Ultralytics' own local QNN export, not Qualcomm AI Hub
+    # (which failed to compile this model) -- see that dir's README.md.
+    yolo26_model_dir: str = "models/yolo26n_pose_qcs6490"
+    # Model dir for the hrnet backend's landmark stage
+    # (inference/backends/hrnet_qnn.py) -- uses the same detector_model_dir
+    # above as its first stage, same as the "qnn" backend.
+    hrnet_model_dir: str = "models/hrnet_pose_qcs6490"
+    # General 80-class object detector (yolo26_detect_qnn.Yolo26Detector),
+    # staged for dashboard visualization -- NOT part of the pose/gesture
+    # pipeline itself, only used when overlay.detect_overlay_enabled is
+    # on. See inference/backends/_yolo26_detect.py's module docstring.
+    yolo26_det_model_dir: str = "models/yolo26_det_qcs6490"
 
 
 @dataclass
@@ -36,6 +56,14 @@ class OverlayConfig:
     # shouldn't happen silently just because the app started.
     web_enabled: bool = False
     web_port: int = 8080
+    # Optional general-object-detection overlay (YOLO26-Detection, all 80
+    # COCO classes -- see inference/backends/_yolo26_detect.py) drawn
+    # alongside the pose skeleton, for visualizing what a general
+    # detector sees versus what's being tracked as a person. Off by
+    # default: it's an extra NPU model call per frame, purely for
+    # visualization/future scene-context work, not needed for the core
+    # pipeline. See docs/backlog.md.
+    detect_overlay_enabled: bool = False
 
 
 @dataclass

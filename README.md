@@ -12,50 +12,64 @@ skip), entirely offline, running on a Radxa Dragon Q6A's Qualcomm Hexagon
 NPU. See `docs/architecture.md` for the pipeline design and
 `docs/hardware.md` for hardware notes and constraints.
 
+**New here, or want the story behind the code?** `docs/journey.md` is a
+narrative retrospective of how this project got built -- what broke, what
+each break taught the next decision, and where the real (non-obvious)
+findings came from. It's the readable version of the detailed logs in
+`scripts/qnn_spike.md` and `docs/backlog.md`.
+
 **Stretch goal:** keep the whole system (OS, code, deps, models) small
 enough to fit comfortably on a 32GB eMMC/UFS module -- see
 `docs/storage-footprint.md`.
 
 ## Status
 
-Milestones 1-3 are in place: scaffolding, capture + pose baseline, and
-multi-person detection + tracking with appearance-based re-ID. The QNN
-backend (`inference/backends/qnn.py`) is validated end-to-end on the
-physical Q6A and fast enough for real-time use, including with multiple
-people: ~15-20ms per `estimate()` call with 2 people detected
-simultaneously (~2.2ms detector + ~1.1ms landmark per person on the
-Hexagon NPU via `onnxruntime`'s QNN execution provider, plus
-preprocessing). `tracking.Tracker` gives each person a stable `track_id`
-across frames -- Kalman + IoU + Hungarian assignment survives brief
-occlusion, and an appearance embedding (OSNet-x0.25, plain FP32 on CPU)
-lets an ID survive fully leaving and re-entering frame, validated on
-physical hardware (0.978 similarity for the same person reappearing at a
-different position, 0.419 against background). See `scripts/qnn_spike.md`
-for the full trail, including real bugs found and fixed along the way (a
-mis-ported ROI formula, a wrong NCHW/NHWC input layout assumption, an
-initial ~476ms-per-frame subprocess approach later replaced by a
-persistent-session one, and a gated-dataset blocker on OSNet's official
-quantization path that led to running it unquantized on CPU instead).
+Milestones 1-4 are in place and validated end-to-end on the physical
+Q6A, including with a live camera and real gestures -- not just
+synthetic tests. The current on-device pipeline
+(`inference/backends/qnn.py`) is a two-stage detector: YOLOv8n-det
+(640x640, first-stage person localization) feeding BlazePose's landmark
+model (25 keypoints per person), both running on the Hexagon NPU via
+`onnxruntime`'s QNN execution provider. This replaced BlazePose's own
+bundled 128x128 detector after real-camera testing found it loses
+small/distant subjects at ordinary room distance regardless of image
+quality -- see `docs/journey.md` for the story and `scripts/qnn_spike.md`
+for the numbers.
 
-Gesture recognition (`gestures/`) is implemented: per-track pose
-normalization, static arm-pose classification (down/raised/out-to-side,
-debounced), a one-armed overhead sweep detector, and a state machine
-mapping to `ControlAction`s (right-out -> NEXT, left-out -> PREVIOUS,
-both-raised -> PLAY_PAUSE, sweep -> SKIP), all edge-triggered so holding
-a pose doesn't repeat-fire. The overlay shows each person's current arm
-states and a banner for the most recently triggered action, satisfying
-the project's causality requirement. Validated with extensive unit tests
-and a sanity check against real (not synthetic) detected keypoints, but
-**not yet with a live camera actually performing the gestures** -- see
-`docs/backlog.md`.
+`tracking.Tracker` gives each person a stable `track_id` across frames --
+Kalman + IoU + Hungarian assignment survives brief occlusion, and an
+appearance embedding (OSNet-x0.25, plain FP32 on CPU) lets an ID survive
+fully leaving and re-entering frame. `reid_similarity_threshold` (0.5)
+is tuned against real measured same-person embedding similarity from
+recorded footage, not a starting guess.
+
+Gesture recognition (`gestures/`) covers all six `ControlAction`s from
+the original brief plus volume control: right-out -> `NEXT`, left-out ->
+`PREVIOUS`, both-raised -> `PLAY_PAUSE`, overhead sweep -> `SKIP`, right
+swipe up -> `VOLUME_UP`, left swipe down -> `VOLUME_DOWN`, all
+edge-triggered. **Validated end-to-end against real recorded footage**
+running the full `estimate -> track -> gesture` loop -- every action has
+been triggered correctly from a real person's real arm movements, though
+reliability still varies with detection hit-rate and camera framing on
+harder footage (see `docs/backlog.md`).
+
+A local browser dashboard (`web/`) streams the live overlay feed plus a
+gesture-trigger queue -- off by default (`OverlayConfig.web_enabled`),
+for demos and debugging without a manual capture/scp/inspect cycle.
 
 Not yet implemented: media control (`gestures.ControlAction`s currently
-just print and show in the overlay; nothing drives Spotify/a player
-yet). Other known gaps tracked in `docs/backlog.md`, notably: the CPU dev
-backend is still single-person, the re-ID similarity threshold is a
-starting guess not tuned against real footage, and the handedness
-assumption in `gestures/normalize.py` (MediaPipe's L/R landmarks are
-anatomical, not mirrored) is unverified against a live camera.
+print and show in the overlay/dashboard; nothing drives Spotify/a player
+yet). Known open gaps, tracked in `docs/backlog.md`: the CPU dev backend
+is still single-person, the re-ID threshold's false-merge risk is
+unvalidated against real multi-person footage, some tracking-identity
+instability may still trace back to camera framing (two alternate
+landmark pipelines, YOLO26-Pose and HRNetPose, are being built alongside
+the current one to help isolate this -- both compile and run on real
+Hexagon NPU hardware, YOLO26-Pose via Ultralytics' own QNN export after
+Qualcomm AI Hub's failed to compile it, but neither is validated on real
+footage yet), and the
+handedness assumption in `gestures/normalize.py` has held up in every
+real test so far but is still worth watching.
 
 ## Setup (dev loop, laptop with a webcam)
 
@@ -81,6 +95,19 @@ Don't set `ADSP_LIBRARY_PATH` yourself for this runtime path --
 `onnxruntime-qnn` manages it internally (pointing at its own bundled
 Hexagon libraries); overriding it causes a QNN device config error. See
 `scripts/qnn_spike.md` for why.
+
+Alternate landmark-stage pipelines (`configs/dragon_q6a_yolo26.yaml`,
+`configs/dragon_q6a_hrnet.yaml`) are being evaluated alongside the
+default above, not replacing it -- see `docs/backlog.md` and
+`docs/journey.md` for status and real-footage results.
+
+## Setup (on-device, Radxa Dragon Q8B)
+
+A second deployment target sharing the Q6A's Hexagon V68 NPU -- every
+model this project has compiled runs there unmodified, no separate
+export needed. See `docs/setup-q8b.md` for full board bring-up. Once
+done, the same install steps as the Q6A apply, just pointed at the Q8B's
+configs (`configs/dragon_q8b.yaml`, or the `_yolo26`/`_hrnet` variants).
 
 ## Exporting/updating on-device models
 
@@ -112,6 +139,22 @@ m.eval()
 torch.onnx.export(m, torch.rand(1, 3, 256, 128), 'model.onnx',
                    input_names=['image'], output_names=['embedding'],
                    opset_version=17, dynamo=False)
+"
+```
+
+The `yolo26` backend's models are exported differently again -- via
+Ultralytics' own local QNN export, not AI Hub (whose compiler fails on
+these models -- see `docs/backlog.md`). Note `soc_model`, not the
+generic `htp_arch`, is required for QCS6490/SC8280XP specifically (see
+`models/yolo26n_pose_qcs6490/README.md` for why):
+
+```bash
+pip install -e ".[hub]"   # includes ultralytics
+python -c "
+from ultralytics.utils import QNN_HTP_TARGETS
+QNN_HTP_TARGETS['qcs6490'] = ('soc_model', '93')
+from ultralytics import YOLO
+YOLO('yolo26n-pose.pt').export(format='qnn', name='qcs6490', imgsz=640)
 "
 ```
 

@@ -82,6 +82,32 @@ don't get lost.
   them could recover a meaningful chunk of the `docs/storage-footprint.md`
   budget. Not done -- needs care to confirm onnxruntime doesn't probe for
   other versions at runtime before deleting anything.
+- **YOLO26-Pose is noticeably slower than the default `qnn` pipeline --
+  not yet root-caused.** Measured on the real-footage comparison
+  (`docs/backlog.md`'s YOLO26 entry above): ~12.6fps vs ~22.1fps for the
+  same recording on the Q6A. Untested hypotheses, in rough order of
+  suspicion, none confirmed yet:
+  - **Compute cost, not overhead.** YOLO26-Pose runs one full 640x640
+    end-to-end forward pass every frame; the `qnn` pipeline's landmark
+    model only processes a small per-person crop (`_blazepose.py`'s ROI),
+    with the 640x640 YOLOv8n-det stage only used for coarse
+    localization. Per-model NPU timing already measured this project
+    (YOLO26 ~14.9ms vs BlazePose landmark ~1.1ms + YOLOv8n-det ~2.2ms
+    combined) suggests this alone could explain most of the gap -- if
+    so, it's an inherent architecture tradeoff, not a bug.
+  - **`w8a16` vs `w8a8` quantization overhead.** Every other model this
+    project runs uses `w8a8`; YOLO26 requires `w8a16` (16-bit
+    activations) on this hardware. Unconfirmed whether/how much slower
+    `w8a16` execution is on Hexagon v68 specifically.
+  - **Python-side decode cost.** `_yolo26_pose.decode_raw_output` +
+    `detect_poses`' NMS run every frame in pure numpy over 8400 raw
+    anchors, unlike the `qnn` pipeline's much smaller post-NMS outputs
+    from an AI-Hub export with post-processing baked into the graph.
+    Not profiled separately from the NPU inference call -- worth timing
+    in isolation before assuming the NPU itself is the bottleneck.
+  - Whatever the cause, ~12.6fps is still usable for gesture-triggered
+    control (not a video-smoothness-critical application), so this is
+    an understand-it item, not necessarily a fix-it-before-using item.
 
 ## Tracking / multi-person (milestone 3 follow-ups)
 
@@ -92,13 +118,12 @@ don't get lost.
   track that fully left frame and reappeared at a different position was
   correctly revived by appearance (0.978 similarity for the same person,
   0.419 against background) -- see `scripts/qnn_spike.md`.
-- **Re-ID similarity threshold (0.6) is a starting guess, not tuned.**
-  Picked as a reasonable default, not validated against a labeled
-  benchmark or real multi-person footage with genuinely different-looking
-  people. Worth revisiting once real camera footage (not a synthetic
-  same-person-twice test image) is available -- both false revivals
-  (different person, same ID) and missed revivals (same person, new ID)
-  are plausible failure modes at the wrong threshold.
+- ~~**Re-ID similarity threshold (0.6) is a starting guess, not tuned.**~~
+  Retuned 2026-09-12 against real recorded footage (measured same-person
+  embedding similarity dipping as low as 0.53) to 0.5 -- see the
+  "Gestures" section below for the full measurement and the still-open
+  false-merge risk this trades for, since real multi-person footage to
+  measure a *different*-person distribution against still doesn't exist.
 - **Re-ID embedding cost scales with simultaneous new/lost detections.**
   ~20-50ms per `ReidEmbedder.embed()` call on the physical Q6A's CPU is
   fine for the common case (one new-or-lost person at a time), but several
@@ -115,17 +140,331 @@ don't get lost.
   (validated working, see `scripts/qnn_spike.md`) -- worth doing if
   multi-person logic needs iterating on a laptop without hardware access
   becomes a real friction point.
-- **QNN landmark visibility output hovers near 0.5 for everything.**
-  Noticed during the NPU spike: the landmark model's 4th output value
-  (visibility) came back very close to sigmoid(0) = 0.5 for all 25 points
-  in every test so far, rather than confidently separating visible from
-  occluded points. The overlay's `_VISIBILITY_THRESHOLD = 0.5` sits right
-  on that boundary, which risks a keypoint flickering on/off between
-  frames as the value jitters across 0.5, rather than a real occlusion
-  signal. Not investigated further -- may be how this particular
-  BlazePose port's landmark model was trained/calibrated, or may need
-  recalibrating the threshold empirically once real (non-static-photo)
-  camera input is available to observe actual occlusion behavior.
+- **QNN landmark visibility output hovers near 0.5 for everything --
+  confirmed again on live footage (2026-09-12), still unresolved.**
+  Noticed during the original NPU spike (static photos only, all 25
+  points ~0.5) and now reconfirmed on 30+ seconds of live camera input
+  while a facing-angle diagnostic was running for an unrelated question
+  (see "Gestures" below): shoulder and wrist visibility sat stable at
+  ~0.50-0.51 the *entire* time, regardless of pose, motion, or which way
+  the person was facing. This isn't a diagnostic bug this time (the
+  earlier version of this same test *was* buggy -- it skipped the
+  required sigmoid transform entirely, showing raw near-zero values
+  that looked like near-zero visibility but were actually just an
+  un-transformed logit; fixing that produced these stable ~0.5 numbers
+  instead). A visibility channel that doesn't move from ~0.5 regardless
+  of real occlusion state can't usefully separate visible from occluded
+  keypoints, which matters directly for `gestures/normalize.py`'s
+  `MIN_KEYPOINT_VISIBILITY = 0.3` gate and `static_poses.classify_arm`'s
+  "wrist not visible" handling. Still not root-caused -- may be how this
+  specific compiled BlazePose landmark model was calibrated, or a
+  quantization precision-loss issue specific to this one output channel
+  (the same project has already found one other channel,
+  `class_idx` on the YOLOv8n-det model, with a nonsensical quantization
+  scale that needed a workaround -- see `models/yolov8n_det_qcs6490/
+  README.md` -- so a similarly mis-calibrated channel here wouldn't be
+  unprecedented). Worth checking whether YOLO26-Pose's independent
+  per-keypoint visibility (see below) has the same problem or not, once
+  that pipeline is testable.
+- **Overlay flicker and ghosting from track fragmentation -- two fixes
+  shipped (2026-09-12), root cause still open.** Real on-device dashboard
+  testing surfaced two related but distinct display problems. First,
+  `Tracker.update()` only ever returns *this frame's* real detections by
+  design (never a synthesized result for a track that's merely coasting,
+  since `gestures.state_machine` needs to know "no observation this
+  frame" as distinct from a confirmed `DOWN` -- see `_ArmDebouncer`), so
+  a detection miss meant the overlay had nothing to draw for that
+  person, popping their skeleton in and out on every gap. Fixed with
+  `app.update_held_overlay`: holds each track's last-known pose/arm-
+  states purely for display until either a fresh detection replaces them
+  or `max_age` frames pass -- gesture recognition itself is untouched,
+  still seeing only real per-frame detections.
+  - Second, and more concerning: the *same continuously-present person*
+    was observed spawning track_ids up into the teens within seconds,
+    including while sitting nearly motionless just typing -- and with
+    the flicker fix now holding each one's last overlay, this stacked
+    several ghosted skeletons on the same physical spot, "very messy"
+    per direct observation. Pulling a live frame from the dashboard
+    showed the likely proximate cause: the camera was still aimed
+    steeply upward (the same framing problem from the facing-camera
+    investigation below), with the person only a tiny, inconsistent
+    sliver of the frame -- an unstable partial-body crop plausibly
+    degrades both IoU box matching and re-ID embedding quality at once.
+    Added an overlap-dedup pass to `update_held_overlay` regardless
+    (`OVERLAY_DEDUP_IOU = 0.5`): when two displayed poses (held or
+    fresh) heavily overlap, only the fresher one survives -- this
+    reduced the visual mess but the user's own follow-up testing still
+    showed "some odd ghosting" afterward, and explicitly pushed back
+    on camera framing being the full explanation. **Not resolved.**
+    This uncertainty -- is the remaining fragmentation still framing,
+    or something in the tracker/re-ID logic itself -- is a primary
+    motivation for building the YOLO26-Pose alongside-pipeline below:
+    if fragmentation drops substantially on the same footage/framing
+    once the two-stage crop pipeline is removed, that's real evidence
+    toward pipeline instability over framing, not just a plausible story.
+- **YOLO26-Pose alongside-pipeline: exported and integrated
+  (2026-09-12), not yet validated on hardware.** `inference.backend:
+  yolo26` (`configs/dragon_q6a_yolo26.yaml`) selects a single end-to-end
+  detection+17-keypoint model in place of the current YOLOv8n-det +
+  BlazePose-landmark two-stage pipeline -- built to run *alongside* the
+  existing `qnn` backend for direct A/B comparison, not to replace it
+  outright. See `docs/journey.md` for the full reasoning and
+  `models/yolo26n_pose_qcs6490/README.md` for the model's provenance and
+  I/O contract once exported. Motivated by two specific, already-
+  diagnosed weak points this architecture sidesteps by construction: the
+  current pipeline's manual crop/ROI step (`_roi_corners_from_box`,
+  already the source of real tuning bugs this project found the hard
+  way) doesn't exist in a single end-to-end model, and BlazePose's
+  landmark model's one scalar all-or-nothing confidence gate
+  (`MIN_LANDMARK_SCORE`) is replaced by an independent per-keypoint
+  visibility, which may (or may not -- untested) also sidestep the
+  facing-camera symptom and/or the near-constant-0.5-visibility issue
+  noted above. Code is written and unit-tested
+  (`tests/test_yolo26_pose.py`); the on-device quantization I/O contract
+  (`inference/backends/yolo26_qnn.py`'s `_OUTPUT_QUANT`) is still
+  placeholder values pending inspection of the actual exported model,
+  and nothing has been run on the physical Q6A yet. **Do not treat this
+  as validated or as a decided replacement** -- the plan is to thoroughly
+  test both pipelines side by side before any final call.
+- **YOLO26-Detection staged for dashboard visualization (2026-09-12), not
+  the pose pipeline.** A second, deliberately separate capability from
+  the YOLO26-Pose alongside-pipeline above: `inference/backends/
+  _yolo26_detect.py` + `yolo26_detect_qnn.Yolo26Detector` run YOLO26's
+  plain detection variant (all 80 COCO classes, not filtered to person)
+  purely as an optional visualization layer -- `overlay.draw_detections`
+  draws every detected object (gray boxes + class + score, visually
+  distinct from the pose skeleton's colored per-track boxes) on the
+  dashboard feed, gated by `overlay.detect_overlay_enabled` (off by
+  default; it's a full extra NPU model call per frame with no benefit to
+  the core pipeline unless someone's actually looking at the dashboard).
+  Not wired into `Tracker`/`GestureStateMachine` at all -- this has
+  nothing to do with pose or gestures today.
+  - **Why this exists, per the actual request:** immediately, to see
+    what a general detector considers "an object" in frame versus what
+    the pose pipeline considers "a person" -- a genuinely useful, cheap
+    diagnostic overlay on its own. Longer-term (not built, explicitly
+    deferred): the original project brief this whole thing is meant to
+    eventually distill back into is swim-safety monitoring, and a pool
+    is exactly the kind of visually cluttered/distorting scene where
+    knowing *what else* is in frame (equipment, reflections
+    mis-detected as something) alongside where people are could help
+    explain or filter false pose/track detections. Nothing here reasons
+    about that yet -- it's raw detections only, staged for whenever that
+    work actually starts.
+  - Code written and unit-tested (`tests/test_yolo26_detect.py`, 6
+    tests); real quantization I/O contract
+    (`yolo26_detect_qnn.py`'s `_OUTPUT_QUANT`) is placeholder pending the
+    export, same caveat as the pose model above. Confirmed the CPU
+    dev-loop backend never imports `onnxruntime_qnn` when this is
+    disabled (the default) -- `Yolo26Detector` is imported lazily inside
+    `app.build_detect_overlay`, not at module load time.
+- ~~**YOLO26 (both variants) fails to compile for QCS6490 via Qualcomm AI
+  Hub -- reproducible, not a fluke (2026-09-12).**~~ **Resolved the same
+  day via a different export toolchain -- see the entry below.** Both
+  `yolo26n_pose_qcs6490` and `yolo26_det_qcs6490` AI-Hub exports failed:
+  the QDQ-to-context-binary compile job failed identically for both with
+  "Conversion to context binary failed with exit code 14," confirmed via
+  `qai_hub.get_job(job_id).get_status()` directly (the AI Hub CLI's own
+  console output is misleading -- it shows a "stuck at 0/3 CREATED"
+  spinner even after the job has actually failed, so always check job
+  status via the API directly, not the CLI progress display). YOLO26
+  only supports `w8a16` quantization via AI Hub for this chipset (older
+  models here use the proven `w8a8` path). Tried `--precision float` as
+  a fallback: failed immediately with `ValueError: ... requires FP16
+  support, but the selected device does not support FP16` -- QCS6490/
+  Hexagon v68 genuinely lacks FP16 hardware support, confirmed by AI
+  Hub's own device-capability check. **The FP16 finding is still real and
+  worth a GitHub issue against `qualcomm/ai-hub-models`** (not yet
+  filed) -- but the original conclusion drawn from the exit-code-14
+  failure ("genuine YOLO26 + w8a16 + QCS6490 incompatibility, not fixable
+  from this project's side") was **wrong**: it was specific to AI Hub's
+  own compile pipeline, not the hardware or the model architecture. See
+  below.
+- **YOLO26 actually works on this hardware -- via Ultralytics' own local
+  QNN export, not Qualcomm AI Hub (resolved 2026-09-12).** The user
+  pointed out that Ultralytics documents official Hexagon V68 support
+  for its own QNN export path (https://docs.ultralytics.com/integrations/qnn),
+  entirely separate from AI Hub's cloud compile service (fully local, no
+  Qualcomm account, `model.export(format="qnn", name="68")`). Tried it
+  directly for both `yolo26n.pt` (detect) and `yolo26n-pose.pt`: **both
+  exported successfully in ~10 seconds each**, producing a
+  self-contained `.onnx` file with a genuine embedded `EPContext` QNN
+  context binary (confirmed via `onnx.load()` -- real node, not a
+  fallback). Copied both files unmodified to the Q8B and ran them
+  through `onnxruntime-qnn`'s QNN execution provider: **both execute
+  successfully on the real Hexagon v68 NPU** -- `yolo26n_qnn.onnx`
+  ~7.1ms median, `yolo26n-pose_qnn.onnx` ~6.7ms median (20 warm calls
+  each), matching the timing profile of every other on-NPU model this
+  project has confirmed. This directly contradicts the AI-Hub-only
+  conclusion above -- YOLO26 + Hexagon v68 is not incompatible, AI Hub's
+  specific compiler/toolchain version has a bug or limitation with this
+  model+precision combination that Ultralytics' own (likely newer or
+  differently-configured) QNN toolchain doesn't hit.
+  - **I/O contract is different from what was originally planned for
+    (and different from AI-Hub-compiled models generally)**: plain
+    float32 in/out (the graph's own `QuantizeLinear`/`DequantizeLinear`
+    nodes handle quantization internally, confirmed via the input
+    tensor's scale ~2^-16 matching 16-bit activation quantization), and
+    **not post-processed** -- Ultralytics' export stops after per-anchor
+    box/keypoint decode, leaving NMS as the caller's job (unlike AI Hub's
+    `include_postprocessing=True` convention this project's other YOLO
+    models were built around). `_yolo26_pose.py`/`_yolo26_detect.py`
+    gained a `decode_raw_output` function each (cxcywh->xyxy + channel
+    splitting -- confirmed exactly from `ultralytics.nn.modules.head`
+    source, not guessed) to bridge into the existing, unchanged
+    score-filter+NMS+mapping logic. `yolo26_qnn.py`/`yolo26_detect_qnn.py`
+    were rewritten to use the new `_qnn_runtime.create_qnn_session` (a
+    plain session, no manual `QuantSpec`) instead of `OnnxQnnRunner`.
+    Placeholder `QuantSpec` values are gone -- this model's real I/O
+    contract was verified directly, not guessed at.
+  - Real models now committed to `models/yolo26n_pose_qcs6490/` and
+    `models/yolo26_det_qcs6490/` (see each dir's `README.md` for full
+    provenance) -- these were empty placeholders before. `ultralytics`
+    added to `pyproject.toml`'s `hub` extra as a documented dev-machine
+    export dependency.
+  - **Correction: the "no reason to expect a different result on the
+    Q6A" assumption above was wrong -- tested directly and it failed.**
+    Copying the Q8B-verified `model.onnx` files to the Q6A and loading
+    them produced a real, reproducible error:
+    `QNN_CONTEXT_ERROR_CREATE_FROM_BINARY: Failure to create context
+    from binary` -- not a version mismatch (`onnxruntime-qnn` 2.6.0 on
+    both boards) and not QNN loading being broken in general (the
+    existing AI-Hub-compiled `yolov8n_det_qcs6490` loaded fine on the
+    same Q6A install, sanity-checked directly). Root cause, found by
+    checking `qai_hub.get_devices()`'s own device attributes rather than
+    guessing: **`soc_model` in the QNN EP is a per-exact-chip identifier,
+    not per-Hexagon-architecture-generation** -- `hexagon:v68` alone
+    covers at least four different `soc-model` values across Qualcomm's
+    real device catalog (30, 35, 39, 93). Ultralytics' generic
+    `name="68"` export option only sets `htp_arch=68` (the architecture
+    generation), which apparently finalizes against a *different* v68
+    variant than QCS6490's own -- compatible with the Q8B's SC8280XP by
+    coincidence/overlap, not with the Q6A's QCS6490.
+  - **Fix**: QCS6490's real `soc_model` value is `93`, read directly off
+    AI Hub's own `Dragonwing RB3 Gen 2 Vision Kit` device entry (a real
+    QCS6490 board AI Hub does support) -- not a guess or a public-docs
+    lookup (Qualcomm's own QNN SDK docs don't publish this mapping
+    anywhere findable). Ultralytics has no built-in name for it, but its
+    `QNN_HTP_TARGETS` dict is a plain importable module-level dict, so
+    registering one is a one-line patch:
+    `QNN_HTP_TARGETS["qcs6490"] = ("soc_model", "93")` before calling
+    `.export(format="qnn", name="qcs6490")`. Re-exported both variants
+    this way and **confirmed running on both boards**: detect ~14.7ms
+    (Q6A) / ~9.6ms (Q8B), pose ~14.9ms (Q6A) / ~9.9ms (Q8B). The
+    `soc_model=93` binary is strictly better than the generic one -- it
+    replaced it in `models/yolo26n_pose_qcs6490/` and
+    `models/yolo26_det_qcs6490/` (see each `README.md` for the full
+    story), not a separate per-board artifact.
+  - **Validated against real footage (2026-09-12): a real, positive
+    result.** Ran the full pipeline (`Yolo26PoseEstimator` +
+    `Tracker`/`ReidEmbedder` + `GestureStateMachine`, identical config to
+    the existing `test_cheese_gestures_reid.py`) against the same
+    recorded cheese-webcam footage (`~/Videos/Webcam/2026-09-12-024357
+    .webm` on the Q6A, one real person walking in/out of frame) already
+    used to characterize the existing `qnn` pipeline's flicker/ghosting
+    behavior, for a direct, same-footage comparison:
+
+    | Metric | `qnn` (BlazePose, existing default) | `yolo26` |
+    |---|---|---|
+    | Frames with a pose detected | 451/923 (49%) | 890/923 (96%) |
+    | Track IDs for the one real person | 2 (a separate identity active for large stretches, own gesture triggers -- real fragmentation) | 1 continuous, with a ~4-frame flicker to a second ID only in the last moment as the person exits/re-enters frame at the very end, self-correcting immediately |
+    | Gestures triggered | 7 (oddly split across the two fragmented IDs) | 14 (all correctly attributed to the one person) |
+    | Speed | ~22.1 fps | ~12.6 fps |
+
+    This is the exact question this alongside-pipeline was built to
+    answer: does removing BlazePose's two-stage crop/ROI step and its
+    single all-or-nothing confidence gate reduce identity fragmentation
+    and improve detection reliability? On this real recording, yes on
+    both counts -- detection rate nearly doubled and the sustained
+    fragmentation essentially disappeared, at the cost of roughly half
+    the frame rate (still comfortably usable for gesture-triggered
+    control; this isn't a video-smoothness-critical application).
+    Confirmed via raw per-frame diagnostics, not just the tracker's
+    output, that YOLO26 never detects more than 1 person simultaneously
+    in this footage (there's only ever been 1 real person in frame for
+    any test so far) -- multi-person behavior specifically is still
+    completely unvalidated and shouldn't be assumed from this result.
+    **One real, honest tradeoff, not yet investigated further**: this
+    export's INT8 calibration used Ultralytics' default 4-image
+    `coco8`/`coco8-pose` dataset, well under the "300+ recommended"
+    warning it printed at export time -- accuracy on harder real-world
+    cases (smaller/farther/partially-occluded people, multi-person
+    scenes) is unproven and could plausibly be improved with a properly-
+    sized, this-project-specific calibration set later.
+- **HRNetPose alongside-pipeline: exported, compiled, and integrated
+  (2026-09-12), not yet validated on hardware.** Same motivation as the YOLO26-Pose alongside-pipeline
+  above (test whether removing the two-stage crop/ROI pipeline reduces
+  fragmentation/ghosting) but via a model that uses the same proven
+  `w8a8` quantization path as the existing `qnn` backend, rather than
+  YOLO26's blocked `w8a16` path. Architecturally this is a top-down,
+  single-person, pre-cropped 256x192 model -- the same role as
+  BlazePose's landmark stage, not a whole-frame detector -- so it would
+  slot in alongside the existing YOLOv8n-det first stage, not replace
+  the two-stage design outright.
+  - Getting the export CLI to even run required working around a broken
+    dev-machine dependency chain: `hrnet_pose`'s package `__init__`
+    unconditionally imports real `mmpose`/`mmdet`/`mmcv` (only needed for
+    an interactive demo feature this project never uses). `mmengine`
+    installed cleanly; `mmcv` failed to build on Python 3.13 (`pkg_resources`
+    removal, then a `KeyError: '__version__'` in its own legacy setup.py)
+    -- worked around with the prebuilt `mmcv-lite` wheel, pinned to
+    `2.1.0` specifically (mmdet asserts `mmcv<2.2.0`). `mmpose`/`mmdet`
+    themselves are pure-Python wheels and installed fine once pulled in
+    with `--no-deps` and their real dependencies installed individually,
+    skipping the three that are broken/unneeded (`chumpy`, `munkres`,
+    `xtcocotools>=1.12` -- `qai_hub_models.extern.mmpose
+    .patch_mmpose_no_build_deps()` auto-stubs the latter two with
+    `MagicMock` when absent; `chumpy` never turned out to be needed on
+    this import path at all). Also needed `yacs` (clean) and
+    `QAIHM_CI=1` env var to auto-confirm export.py's interactive "ok to
+    clone external repo" prompt non-interactively.
+  - **Caught and fixed a real mistake while doing this work:** the
+    `torchvision`/mmpose install pulled in `torch==2.14.0` as a
+    transitive dependency, silently upgrading past `qai_hub_models`'
+    own pin (`torch<=2.11.0,>=2.4`) -- would have risked breaking the
+    export toolchain for every model, not just HRNetPose. Caught before
+    running the actual export and pinned back down to `torch==2.11.0` /
+    `torchvision==0.26.0` (both `+cpu`, matching what was already
+    working). Also caught that the very first install attempt landed in
+    the machine's global Python, not the project `.venv` -- redone
+    correctly against `.venv/Scripts/python.exe` before anything that
+    mattered ran.
+  - Once the import chain was fixed, `export.py --chipset qcs6490
+    --target-runtime precompiled_qnn_onnx --precision w8a8` actually
+    **scheduled real jobs** (float-model compile, quantize, QDQ compile,
+    profile) -- notably further than YOLO26 got. (The CLI itself crashed
+    at the very end with an unrelated `UnicodeEncodeError` trying to
+    print a Unicode spinner character to a `cp1252` Windows console --
+    cosmetic, the jobs were already scheduled server-side by that point;
+    check real status via `qai_hub.get_job(job_id).get_status()`.)
+  - **Result: float compile, quantize, QDQ-to-context-binary compile, and
+    profiling all SUCCEEDED.** This is the exact step that failed with
+    "exit code 14" for both YOLO26 variants -- HRNetPose compiles cleanly
+    for QCS6490 on the proven `w8a8` path where YOLO26's `w8a16` path did
+    not. Profiled median inference time on a real device: ~5.9ms per
+    call for the landmark stage alone (~5x BlazePose's ~1.1ms, still well
+    within a 30fps budget alongside the ~2.2ms detector stage). Model
+    downloaded and committed to `models/hrnet_pose_qcs6490/` (real
+    `input_spec`/`output_spec` read directly off the compiled model, no
+    placeholder quantization values needed this time -- see that
+    directory's `README.md`).
+  - **Integration code written**: `inference/backends/_hrnet_pose.py`
+    (heatmap decode: per-keypoint argmax + peak-value confidence, no
+    sub-pixel refinement yet; reuses `_blazepose.py`'s box-to-ROI crop
+    geometry and `_yolo26_pose.py`'s COCO->`Landmark` mapping table) and
+    `hrnet_qnn.HrnetPoseEstimator` (reuses the same YOLOv8n-det first
+    stage as the `qnn` backend). Selected via `inference.backend: hrnet`
+    (`configs/dragon_q6a_hrnet.yaml`). Unit-tested
+    (`tests/test_hrnet_pose.py`, 5 tests -- heatmap decode math,
+    confidence clamping, box-to-frame coordinate mapping via a
+    centered-box/centered-peak identity check, COCO keypoint identity
+    mapping, one-result-per-box). Full suite (127 tests) still green.
+  - **Still not validated end-to-end or tried on the physical Q6A** --
+    everything above is dev-machine unit testing plus AI Hub's own
+    device-farm profiling, not this project's actual gesture/tracking
+    pipeline on real footage. That's the next step whenever hardware time
+    is available, alongside the already-running `qnn` and `yolo26`
+    configs for a real three-way comparison.
 
 ## Gestures (milestone 4 follow-ups)
 
@@ -468,6 +807,23 @@ don't get lost.
 - ~~**Boot media: microSD vs UFS.**~~ Resolved 2026-09-11: reflashed to
   the r2 UFS image variant, now booting from the 128GB UFS module instead
   of the microSD card (see `docs/setup-q6a.md`).
+- ~~**Radxa Dragon Q8B viability.**~~ Resolved 2026-09-12, and the initial
+  answer was wrong: first check (AI Hub's own `qai_hub.get_devices()`
+  device catalog has no `sc8280xp` entry) was read as "this board can't
+  run anything," but that only rules out *new* AI-Hub cloud compiles
+  targeting it by name. Per Radxa's own docs and confirmed on the
+  physical board, SC8280XP and QCS6490 share the same Hexagon V68
+  architecture (`fastrpc_test -a v68` passes identically to the Q6A), and
+  this project's already-compiled QCS6490 models (`yolov8n_det_qcs6490`,
+  `hrnet_pose_qcs6490`) load and run on the Q8B's real NPU via
+  `onnxruntime-qnn` completely unmodified, at timings matching the Q6A.
+  **The Q8B is a viable second deployment target for every model this
+  project has already compiled, including YOLO26** (see the YOLO26 entry
+  above -- its Ultralytics-exported models were verified running on this
+  exact board) -- see `docs/setup-q8b.md` for the full verification. No
+  camera attached yet (the Nexigo webcam needs to move over from the
+  Q6A) and no end-to-end pipeline test has been run there -- that's the
+  actual remaining step, not toolchain support.
 
 ## Product scope (from the original project brief)
 
