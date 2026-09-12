@@ -1,3 +1,3 @@
-from .renderer import draw_pose
+from .renderer import draw_poses
 
-__all__ = ["draw_pose"]
+__all__ = ["draw_poses"]

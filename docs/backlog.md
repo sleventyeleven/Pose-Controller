@@ -41,6 +41,50 @@ don't get lost.
   budget. Not done -- needs care to confirm onnxruntime doesn't probe for
   other versions at runtime before deleting anything.
 
+## Tracking / multi-person (milestone 3 follow-ups)
+
+- ~~**Appearance-based re-ID.**~~ Resolved 2026-09-11: `tracking.reid.
+  ReidEmbedder` (OSNet-x0.25, plain FP32 on CPU -- see
+  `models/osnet_x0_25/README.md` for why not NPU/quantized) wired into
+  `Tracker` via a lost-track gallery. Validated on the physical Q6A: a
+  track that fully left frame and reappeared at a different position was
+  correctly revived by appearance (0.978 similarity for the same person,
+  0.419 against background) -- see `scripts/qnn_spike.md`.
+- **Re-ID similarity threshold (0.6) is a starting guess, not tuned.**
+  Picked as a reasonable default, not validated against a labeled
+  benchmark or real multi-person footage with genuinely different-looking
+  people. Worth revisiting once real camera footage (not a synthetic
+  same-person-twice test image) is available -- both false revivals
+  (different person, same ID) and missed revivals (same person, new ID)
+  are plausible failure modes at the wrong threshold.
+- **Re-ID embedding cost scales with simultaneous new/lost detections.**
+  ~20-50ms per `ReidEmbedder.embed()` call on the physical Q6A's CPU is
+  fine for the common case (one new-or-lost person at a time), but several
+  people all triggering appearance checks in the same frame would add up
+  (e.g. 4 simultaneous new detections ≈ 100-200ms just for re-ID). Not
+  a problem yet at this project's realistic scale (a handful of people),
+  but worth knowing if a scenario with many simultaneous entries/exits
+  comes up.
+- **CPU dev backend is still single-person.** `mp.solutions.pose` (the
+  legacy MediaPipe API `cpu.py` uses) doesn't support multi-person
+  detection; MediaPipe's newer Tasks API
+  (`mediapipe.tasks.python.vision.PoseLandmarker` with `num_poses`) does.
+  Not migrated since the real multi-person target is the QNN backend
+  (validated working, see `scripts/qnn_spike.md`) -- worth doing if
+  multi-person logic needs iterating on a laptop without hardware access
+  becomes a real friction point.
+- **QNN landmark visibility output hovers near 0.5 for everything.**
+  Noticed during the NPU spike: the landmark model's 4th output value
+  (visibility) came back very close to sigmoid(0) = 0.5 for all 25 points
+  in every test so far, rather than confidently separating visible from
+  occluded points. The overlay's `_VISIBILITY_THRESHOLD = 0.5` sits right
+  on that boundary, which risks a keypoint flickering on/off between
+  frames as the value jitters across 0.5, rather than a real occlusion
+  signal. Not investigated further -- may be how this particular
+  BlazePose port's landmark model was trained/calibrated, or may need
+  recalibrating the threshold empirically once real (non-static-photo)
+  camera input is available to observe actual occlusion behavior.
+
 ## Hardware
 
 - **ArduCam v2 8MP compatibility.** Not yet tested on the Q6A. No matching

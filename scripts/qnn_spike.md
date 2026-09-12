@@ -214,3 +214,86 @@ noise.
 ~261MB installed -- a real cost against `docs/storage-footprint.md`'s
 budget, with a known pruning opportunity (unused Hexagon HTP versions
 bundled in) tracked in `docs/backlog.md`.
+
+## Milestone 3: multi-person detection (2026-09-11)
+
+`_blazepose.py`'s `_top_detection` (top-1 only) was replaced with
+`_select_detections`: real greedy NMS over all 896 anchors' decoded boxes
+(kept for dedup only -- the actual per-person ROI still comes from
+keypoints, see `_compute_roi_corners`'s docstring), returning every
+detection above `MIN_DETECTOR_SCORE` up to `MAX_PERSONS`. Each surviving
+detection runs through the same ROI->crop->landmark path as before,
+independently.
+
+Validated on the physical Q6A with a synthetic two-person image (two
+crops of the demo photo placed side by side): 2 people correctly detected
+with disjoint, correctly-positioned bounding boxes, ~15-20ms per frame
+total (both people) -- the multi-person case barely costs more than
+single-person, confirming the ~2ms/model NPU execution time is the real
+bottleneck unit, not some fixed per-frame overhead.
+
+## Milestone 3: appearance-based re-ID (2026-09-11)
+
+Added to close the gap `tracking.Tracker`'s Kalman/IoU tracking can't:
+recognizing someone who fully left the camera's field of view and
+returned (not just brief occlusion, which Kalman/IoU already handles via
+`max_age` coasting).
+
+**Model: OSNet, not a hand-rolled choice.** `qai_hub_models` already
+catalogs OSNet (`qai_hub_models.models.osnet`) -- the exact model class
+the original project plan named (OSNet-x0.25) -- complete with pretrained
+weights, multiple width variants, and QCS6490 listed in `perf.yaml`'s
+`supported_chipsets`. Re-used it directly rather than sourcing/training a
+custom re-ID model.
+
+**Blocker: quantization needs a gated dataset.** Attempted the same
+`--target-runtime precompiled_qnn_onnx --precision w8a8` export used for
+`mediapipe_pose`. The compile step succeeded, but quantization failed:
+```
+UnfetchableDatasetError: To use dataset entire_id, you must download it manually.
+  1. Open the Google Drive folder: https://drive.google.com/drive/folders/...
+  2. Download bounding_box_test/ and query/, zip them together
+  3. Run: python -m qai_hub_models.scripts.configure_dataset --class ...ENTIReIDDataset --files ...
+```
+`OSNet.get_calibration_dataset_cls()` requires `ENTIReIDDataset`; the
+eval dataset (`Market1501Dataset`) is *also* gated the same way (both are
+long-standing real licensing quirks of these actual ReID benchmark
+datasets, not something `qai_hub_models` can route around). Rather than
+ask the user to navigate a manual Google Drive download+zip+configure
+step, or substitute ad-hoc calibration images for a model whose own code
+explicitly flags quantization-sensitivity
+(`OSNet.get_hub_quantize_options` overrides the default range scheme
+specifically because "min_max: tf_enhanced clips OSNet embeddings and
+tanks w8a8 ReID mAP") -- reconsidered the actual requirement instead.
+
+**Re-examining the requirement changed the right answer.** Pose
+estimation runs on every person every frame (real-time-critical -- worth
+the NPU/quantization investment). Re-ID only runs when `Tracker` can't
+IoU-match a detection to an existing track -- occasional, not per-frame.
+OSNet-x0.25 is ~0.71M parameters; a quick local check
+(`torch.onnx.export`, eager PyTorch, unoptimized) showed ~26ms/call on a
+dev laptop CPU. That's fast enough for occasional use without NPU
+compilation at all. Exported via plain `torch.onnx.export` (opset 17,
+`dynamo=False` -- the new dynamo-based default exporter needs
+`onnxscript`, not installed) and run via onnxruntime's default
+`CPUExecutionProvider` -- no AI Hub compile job, no quantization, no
+gated dataset. See `models/osnet_x0_25/README.md`.
+
+**Result, validated on the physical Q6A:** ~20-50ms per embedding call
+(ARM CPU, slower than the x86 dev-laptop number above but still fine for
+occasional use). Using the same synthetic two-person image: cosine
+similarity between the two (visually identical) people was **0.978**,
+against an unrelated background patch **0.419** -- the model
+discriminates meaningfully, not just returning a constant. Full
+end-to-end test: a track that "disappeared" past `max_age` and
+reappeared at a **completely different position** (left side of frame to
+right side -- IoU/Kalman alone would never relink this) was correctly
+revived with its original `track_id`.
+
+`tracking.Tracker` now accepts an optional `embedder: ReidEmbedder`; when
+a track ages out past `max_age`, its last-known embedding moves to a
+"lost gallery" for `reid_gallery_ttl` additional frames, and new
+unmatched detections are checked against that gallery by cosine
+similarity before a fresh ID is allocated. `reid_similarity_threshold`
+(default 0.6) is a reasonable starting point, not empirically tuned
+against a benchmark -- see `docs/backlog.md`.

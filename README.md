@@ -18,19 +18,29 @@ enough to fit comfortably on a 32GB eMMC/UFS module -- see
 
 ## Status
 
-Milestone 1 (scaffolding) and the start of milestone 2 (capture +
-single-pose baseline) are in place for both backends. The QNN backend
-(`inference/backends/qnn.py`) is implemented and validated end-to-end on
-the physical Q6A, and fast enough for real-time use: a full `estimate()`
-call takes ~26ms (~2.2ms detector + ~1.1ms landmark on the Hexagon NPU,
-via `onnxruntime`'s QNN execution provider, plus preprocessing) -- see
-`scripts/qnn_spike.md` for the full trail, including three real bugs
-found and fixed along the way (a mis-ported ROI formula, a wrong NCHW/
-NHWC input layout assumption, and an initial ~476ms-per-frame subprocess
-approach later replaced by a persistent-session one).
+Milestones 1-3 are in place: scaffolding, capture + pose baseline, and
+multi-person detection + tracking with appearance-based re-ID. The QNN
+backend (`inference/backends/qnn.py`) is validated end-to-end on the
+physical Q6A and fast enough for real-time use, including with multiple
+people: ~15-20ms per `estimate()` call with 2 people detected
+simultaneously (~2.2ms detector + ~1.1ms landmark per person on the
+Hexagon NPU via `onnxruntime`'s QNN execution provider, plus
+preprocessing). `tracking.Tracker` gives each person a stable `track_id`
+across frames -- Kalman + IoU + Hungarian assignment survives brief
+occlusion, and an appearance embedding (OSNet-x0.25, plain FP32 on CPU)
+lets an ID survive fully leaving and re-entering frame, validated on
+physical hardware (0.978 similarity for the same person reappearing at a
+different position, 0.419 against background). See `scripts/qnn_spike.md`
+for the full trail, including real bugs found and fixed along the way (a
+mis-ported ROI formula, a wrong NCHW/NHWC input layout assumption, an
+initial ~476ms-per-frame subprocess approach later replaced by a
+persistent-session one, and a gated-dataset blocker on OSNet's official
+quantization path that led to running it unquantized on CPU instead).
 
-Not yet implemented: multi-person tracking, gesture recognition, the
-overlay causality UI, and media control.
+Not yet implemented: gesture recognition and media control. Known gaps
+tracked in `docs/backlog.md`, notably: the CPU dev backend is still
+single-person, and the re-ID similarity threshold is a starting guess,
+not tuned against real multi-person footage.
 
 ## Setup (dev loop, laptop with a webcam)
 
@@ -47,7 +57,7 @@ See `docs/setup-q6a.md` for full board bring-up (image, BIOS, NPU
 packages, camera). Once done:
 
 ```bash
-sudo apt-get install -y python3-opencv python3-numpy fastrpc fastrpc-test fastrpc-dev libcdsprpc1 radxa-firmware-qcs6490
+sudo apt-get install -y python3-opencv python3-numpy python3-scipy fastrpc fastrpc-test fastrpc-dev libcdsprpc1 radxa-firmware-qcs6490
 pip install --break-system-packages -e ".[device]"   # onnxruntime-qnn -- ~261MB, see docs/storage-footprint.md
 python3 -m pose_controller.app --config configs/dragon_q6a.yaml
 ```
@@ -72,6 +82,23 @@ QAIHM_CI=1 python -m qai_hub_models.models.mediapipe_pose.export \
 
 See `models/mediapipe_pose_qcs6490/README.md` for the currently-checked-in
 export's provenance and profiling results.
+
+The re-ID model (`models/osnet_x0_25/`) is exported differently -- plain
+`torch.onnx.export`, no AI Hub compile job, no quantization (see
+`models/osnet_x0_25/README.md` for why):
+
+```bash
+pip install -e ".[hub]"
+python -c "
+import torch
+from qai_hub_models.models.osnet.model import OSNet
+m = OSNet.from_pretrained('osnet_x0_25')
+m.eval()
+torch.onnx.export(m, torch.rand(1, 3, 256, 128), 'model.onnx',
+                   input_names=['image'], output_names=['embedding'],
+                   opset_version=17, dynamo=False)
+"
+```
 
 ## Running tests
 

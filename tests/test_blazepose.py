@@ -47,29 +47,75 @@ def test_decode_boxes_applies_anchor_offset_and_scale():
     assert np.allclose(decoded[0, 2], [52.0, 52.0])
 
 
-def test_top_detection_returns_none_below_threshold():
+def test_select_detections_returns_empty_below_threshold():
     anchors = np.zeros((896, 2, 2), dtype=np.float32)
     anchors[:, 1, :] = 1.0  # scale=1 so decode doesn't blow up
     box_coords = np.zeros((896, 12), dtype=np.float32)
     # Raw score of 0 -> sigmoid 0.5, well below MIN_DETECTOR_SCORE (0.75).
     box_scores = np.zeros(896, dtype=np.float32)
 
-    assert _blazepose._top_detection(box_coords, box_scores, anchors) is None
+    assert _blazepose._select_detections(box_coords, box_scores, anchors) == []
 
 
-def test_top_detection_picks_highest_scoring_anchor():
+def test_select_detections_picks_highest_scoring_anchor():
     anchors = np.zeros((896, 2, 2), dtype=np.float32)
     anchors[:, 1, :] = 1.0
     box_coords = np.zeros((896, 12), dtype=np.float32)
-    box_coords[42, 2:] = 10.0  # keypoints for the winning anchor
+    box_coords[42, 2:] = 10.0  # box w/h + keypoints for the winning anchor
     box_scores = np.full(896, -100.0, dtype=np.float32)
     box_scores[42] = 100.0  # sigmoid ~1.0, clearly above threshold
 
-    keypoints = _blazepose._top_detection(box_coords, box_scores, anchors)
+    detections = _blazepose._select_detections(box_coords, box_scores, anchors)
 
-    assert keypoints is not None
-    assert keypoints.shape == (4, 2)
-    assert np.allclose(keypoints, 10.0)
+    assert len(detections) == 1
+    assert detections[0].shape == (4, 2)
+    assert np.allclose(detections[0], 10.0)
+
+
+def test_select_detections_returns_multiple_well_separated_people():
+    anchors = np.zeros((896, 2, 2), dtype=np.float32)
+    anchors[:, 1, :] = 1.0
+    box_coords = np.zeros((896, 12), dtype=np.float32)
+    # Two detections, far apart -- box center (indices 0,1), w/h (2,3), then
+    # keypoints (4-11). Distinct box positions so NMS doesn't merge them.
+    box_coords[10, :4] = [10.0, 10.0, 20.0, 20.0]
+    box_coords[10, 4:] = 1.0
+    box_coords[500, :4] = [100.0, 100.0, 20.0, 20.0]
+    box_coords[500, 4:] = 2.0
+    box_scores = np.full(896, -100.0, dtype=np.float32)
+    box_scores[10] = 100.0
+    box_scores[500] = 90.0  # still clearly above threshold, but lower than 10
+
+    detections = _blazepose._select_detections(box_coords, box_scores, anchors)
+
+    assert len(detections) == 2
+    # Highest score first.
+    assert np.allclose(detections[0], 1.0)
+    assert np.allclose(detections[1], 2.0)
+
+
+def test_greedy_nms_suppresses_overlapping_lower_score_box():
+    boxes = np.array(
+        [[0.0, 0.0, 10.0, 10.0], [1.0, 1.0, 11.0, 11.0], [50.0, 50.0, 60.0, 60.0]],
+        dtype=np.float32,
+    )
+    scores = np.array([0.9, 0.8, 0.7], dtype=np.float32)
+
+    kept = _blazepose._greedy_nms(boxes, scores, iou_threshold=0.3)
+
+    # Box 1 heavily overlaps box 0 (higher score) -- suppressed. Box 2 is
+    # far away -- kept independently.
+    assert kept == [0, 2]
+
+
+def test_iou_of_identical_boxes_is_one():
+    box = np.array([0.0, 0.0, 10.0, 10.0])
+    boxes = np.array([[0.0, 0.0, 10.0, 10.0], [20.0, 20.0, 30.0, 30.0]])
+
+    ious = _blazepose._iou(box, boxes)
+
+    assert np.isclose(ious[0], 1.0)
+    assert np.isclose(ious[1], 0.0)
 
 
 def test_compute_roi_corners_square_and_centered_when_axis_aligned():

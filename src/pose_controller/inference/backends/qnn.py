@@ -68,16 +68,17 @@ class QnnPoseEstimator(PoseEstimator):
         landmarks = out["landmarks"].reshape(_blazepose.NUM_VALID_LANDMARKS, 4)
         return score, landmarks
 
-    def estimate(self, frame_bgr: np.ndarray) -> PoseResult | None:
-        landmarks = _blazepose.detect_pose(
+    def estimate(self, frame_bgr: np.ndarray) -> list[PoseResult]:
+        all_landmarks = _blazepose.detect_poses(
             frame_bgr, self._run_detector, self._run_landmark_detector, self._anchors
         )
-        if landmarks is None:
-            return None
 
         h, w = frame_bgr.shape[:2]
-        keypoints = {
-            idx: Keypoint(x=lm[0] / w, y=lm[1] / h, visibility=float(lm[3]))
-            for idx, lm in enumerate(landmarks)
-        }
-        return PoseResult(keypoints=keypoints)
+        results = []
+        for landmarks in all_landmarks:
+            keypoints = {
+                idx: Keypoint(x=lm[0] / w, y=lm[1] / h, visibility=float(lm[3]))
+                for idx, lm in enumerate(landmarks)
+            }
+            results.append(PoseResult(keypoints=keypoints))
+        return results

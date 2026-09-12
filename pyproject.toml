@@ -15,6 +15,12 @@ dependencies = [
 dev = [
     "mediapipe>=0.10",
     "pytest>=8.0",
+    # Plain CPU onnxruntime for tracking.reid.ReidEmbedder (person re-ID).
+    # On-device this comes transitively via the `device` extra's
+    # onnxruntime-qnn (which depends on plain onnxruntime); listed here too
+    # so the dev-loop CPU backend can exercise re-ID without installing the
+    # much larger onnxruntime-qnn.
+    "onnxruntime>=1.20",
 ]
 # Dev-machine only -- pulls in PyTorch to export/quantize models via
 # Qualcomm AI Hub's cloud compile service. Never install on the Q6A itself
