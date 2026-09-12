@@ -75,9 +75,12 @@ the Q6A:
     `docs/backlog.md`). `_hrnet_pose.py` decodes its heatmap output
     (64x48x17, one confidence map per COCO keypoint) via per-keypoint
     argmax and reuses `_yolo26_pose.py`'s COCO->`Landmark` mapping, so
-    again every downstream consumer is unchanged. Compiled and profiled
-    successfully on a real device; not yet validated on the physical Q6A
-    -- see `docs/backlog.md` for status.
+    again every downstream consumer is unchanged. Compiled and confirmed
+    running on both the Q6A's and Q8B's real NPUs; not yet run against
+    real footage -- see `docs/backlog.md` for status. (See
+    `docs/pipelines.md` for a flow diagram of each of these three
+    pipelines -- `qnn`/`hrnet`/`yolo26` -- and every measured performance
+    number, on every board tested, in one place.)
 - **tracking/** -- `Tracker.update(detections, frame_bgr) -> detections`
   (with `track_id` populated). Two layers:
   - Position/motion (always on): a constant-velocity Kalman filter per
@@ -126,13 +129,22 @@ the Q6A:
   reliability is still limited by detection-hit-rate/tracking-continuity
   on harder footage, not the gesture logic itself -- see
   `docs/backlog.md`.
-- **control/** (milestone 6, not yet built) -- `MediaController`
-  abstraction (play/pause/next/previous/volume) that would actually carry
-  out a `gestures.ControlAction`. First backend emulates OS media keys /
-  Linux D-Bus MPRIS against whatever player is already running and
-  authenticated, which decouples the offline vision pipeline from
-  Spotify's own auth/streaming requirements. For now, `app.py` just
-  prints triggered actions and shows them in the overlay banner.
+- **control/** (milestone 6, built 2026-09-12, not yet validated on real
+  hardware) -- `MediaController` abstraction (play/pause/next/previous/
+  volume) that actually carries out a `gestures.ControlAction`, via
+  `dispatch()`. The `playerctl` backend
+  (`control/backends/playerctl.py`) emulates OS media keys / Linux D-Bus
+  MPRIS against whatever player is already running and authenticated
+  (Spotify's official Linux client, or any other MPRIS-compliant
+  player), which decouples the offline vision pipeline from Spotify's
+  own auth/streaming requirements -- no Spotify-specific code exists
+  anywhere in this module. Off by default (`control.enabled`); degrades
+  to a no-op `NullMediaController` if `playerctl` isn't installed,
+  matching `build_tracker`'s `ReidEmbedder` fallback pattern. `app.py`
+  still prints triggered actions and shows them in the overlay banner
+  regardless of whether control is enabled -- that causality display was
+  never conditional on this. See `docs/backlog.md` for what's still
+  unvalidated.
 - **overlay/** -- `draw_poses` renders skeleton + track-ID + each
   person's current confirmed arm states (e.g. "L:- R:OUT"), color-keyed
   by `track_id`; `draw_action_banner` shows the most recently triggered
@@ -141,8 +153,10 @@ the Q6A:
   action it triggers, not just the action appearing with no visible
   cause.
 - **web/** (initial draft) -- `DashboardState` + `DashboardServer`: a
-  browser-viewable page showing the live overlay frame (MJPEG stream)
-  and a scrolling gesture-trigger queue, on a background thread alongside
+  browser-viewable page showing the live overlay frame (MJPEG stream),
+  a scrolling gesture-trigger queue, and (when `control.enabled`) a
+  media-control status panel (connected/paused/playing, now-playing
+  title/artist) polled from `/media`, on a background thread alongside
   the main capture loop. Standard-library `http.server` only, no new
   dependency. Off by default (`OverlayConfig.web_enabled`) -- for demos,
   debugging, and pipeline iteration without a display attached or a
@@ -151,11 +165,11 @@ the Q6A:
   scoping, on-device validation).
 - **app.py + config.py** -- orchestrates the pipeline loop (capture ->
   `PoseEstimator.estimate` -> `Tracker.update` -> `GestureStateMachine.
-  update_all` -> `draw_poses` + `draw_action_banner` +
-  `DashboardState.update_frame`/`add_event` when the dashboard is
-  enabled). `AppConfig` loads from YAML (`configs/dev_laptop.yaml` vs
-  `configs/dragon_q6a.yaml`), so switching hardware is a config change,
-  not a code change.
+  update_all` -> `MediaController.dispatch` + `draw_poses` +
+  `draw_action_banner` + `DashboardState.update_frame`/`add_event`/
+  `update_media_status` when the dashboard is enabled). `AppConfig` loads
+  from YAML (`configs/dev_laptop.yaml` vs `configs/dragon_q6a.yaml`), so
+  switching hardware is a config change, not a code change.
 
 Current status: milestones 1-4 are in place (scaffolding, capture + pose
 baseline, multi-person detection + tracking with re-ID, gesture

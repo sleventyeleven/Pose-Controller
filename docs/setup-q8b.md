@@ -147,6 +147,14 @@ successfully on the Q8B's real Hexagon v68 NPU** via the exact same
 | `yolo26n_qnn.onnx` (detect) | ~7.1ms | not yet tested on Q6A |
 | `yolo26n-pose_qnn.onnx` | ~6.7ms | not yet tested on Q6A |
 
+(The two YOLO26 rows above are from the first export attempt, generically
+targeting Hexagon architecture v68 -- since superseded by a QCS6490-
+`soc_model`-targeted re-export after this generic one failed to load on
+the Q6A entirely; see `docs/backlog.md`. **For current numbers on both
+boards, all pipelines, see `docs/pipelines.md`** -- this table is kept
+here as the historical record of this board's initial bring-up
+verification, not a live reference.)
+
 All ran genuinely on the NPU (QNN execution provider found and used,
 real DSP/`rpcmem` activity in the logs), not a silent CPU fallback. The
 `yolov8n_det` gap versus the Q6A's own measured number is plausible clock/

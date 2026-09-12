@@ -362,14 +362,13 @@ don't get lost.
     recorded cheese-webcam footage (`~/Videos/Webcam/2026-09-12-024357
     .webm` on the Q6A, one real person walking in/out of frame) already
     used to characterize the existing `qnn` pipeline's flicker/ghosting
-    behavior, for a direct, same-footage comparison:
-
-    | Metric | `qnn` (BlazePose, existing default) | `yolo26` |
-    |---|---|---|
-    | Frames with a pose detected | 451/923 (49%) | 890/923 (96%) |
-    | Track IDs for the one real person | 2 (a separate identity active for large stretches, own gesture triggers -- real fragmentation) | 1 continuous, with a ~4-frame flicker to a second ID only in the last moment as the person exits/re-enters frame at the very end, self-correcting immediately |
-    | Gestures triggered | 7 (oddly split across the two fragmented IDs) | 14 (all correctly attributed to the one person) |
-    | Speed | ~22.1 fps | ~12.6 fps |
+    behavior, for a direct, same-footage comparison -- see
+    `docs/pipelines.md`'s "Full-pipeline real-footage results" table for
+    the numbers (detection rate nearly doubled, 49%->96%; the person who
+    fragmented into two tracked identities under `qnn` held one
+    continuous identity throughout under `yolo26`, aside from a ~4-frame
+    flicker in the very last moment as they left frame; 7 vs. 14 gestures
+    triggered; ~22.1fps vs ~12.6fps).
 
     This is the exact question this alongside-pipeline was built to
     answer: does removing BlazePose's two-stage crop/ROI step and its
@@ -441,9 +440,9 @@ don't get lost.
     profiling all SUCCEEDED.** This is the exact step that failed with
     "exit code 14" for both YOLO26 variants -- HRNetPose compiles cleanly
     for QCS6490 on the proven `w8a8` path where YOLO26's `w8a16` path did
-    not. Profiled median inference time on a real device: ~5.9ms per
-    call for the landmark stage alone (~5x BlazePose's ~1.1ms, still well
-    within a 30fps budget alongside the ~2.2ms detector stage). Model
+    not. See `docs/pipelines.md`'s performance table for real measured
+    inference time on both boards (well within a 30fps budget alongside
+    the shared YOLOv8n-det first stage). Model
     downloaded and committed to `models/hrnet_pose_qcs6490/` (real
     `input_spec`/`output_spec` read directly off the compiled model, no
     placeholder quantization values needed this time -- see that
@@ -792,6 +791,49 @@ don't get lost.
   - `control/` (media control backend, milestone 6) still doesn't exist,
     so these join `NEXT`/`PREVIOUS`/`PLAY_PAUSE`/`SKIP` as actions that
     print/display but don't yet drive real volume control.
+
+## Control (milestone 6)
+
+- **`control/` built (2026-09-12): media control now drives a real
+  player via D-Bus MPRIS, not yet validated on real hardware.** Per the
+  original project plan's own stated approach ("emulates OS media keys /
+  Linux D-Bus MPRIS against whatever player is already running and
+  authenticated"), `control.media_controller.MediaController` is an
+  abstract interface (`play_pause`/`next`/`previous`/`volume_up`/
+  `volume_down`/`get_status`) with `dispatch(ControlAction)` owning the
+  action->method mapping (`SKIP` and `NEXT` -- two different gestures --
+  both map to `next()`, since there's no separate "skip forward N
+  seconds" concept anywhere in this project's gesture vocabulary).
+  - **Backend: `control.backends.playerctl.PlayerctlController`**, shelling
+    out to the `playerctl` CLI (`sudo apt install playerctl`) rather than
+    a D-Bus client library directly -- `playerctl` already handles
+    picking "the" active player when several run at once, and avoids
+    adding `dbus-python` (needs system dev headers to build) as a
+    dependency for a first implementation. Works against Spotify's
+    official Linux client (which exposes MPRIS) with zero Spotify-
+    specific code; any other MPRIS-compliant player works identically.
+    A background thread polls `playerctl status`/`metadata` every 2s for
+    `get_status()` (display only, e.g. the dashboard's media panel) --
+    every actual gesture-triggered action is a separate, immediate,
+    short-timeout (2s) subprocess call so a hung D-Bus call can never
+    block a gesture trigger.
+  - Off by default (`control.enabled: false`) and degrades to a
+    `NullMediaController` no-op if `playerctl` isn't installed or fails
+    to start, matching this project's existing degrade-don't-crash
+    pattern (`app.build_tracker`'s `ReidEmbedder` fallback) -- an
+    optional feature failing to initialize should never take the whole
+    app down.
+  - Web dashboard gained a "Media Control" panel (connected/paused/
+    playing status dot, now-playing title/artist when available) polled
+    via a new `/media` JSON endpoint, `DashboardState.update_media_status`.
+  - **Not yet tested against a real player or real hardware** -- built
+    and unit-tested entirely with `subprocess.run` mocked
+    (`tests/test_control.py`), since the dev machine has no Linux D-Bus
+    session to test against. Real validation (does `playerctl` actually
+    control Spotify on the Q6A/Q8B, does the dashboard panel update
+    correctly, does volume step size feel right) is the real next step,
+    same caveat as every other "built but not yet run on real hardware"
+    item in this document.
 
 ## Hardware
 

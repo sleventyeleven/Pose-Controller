@@ -5,6 +5,7 @@ import urllib.request
 
 import numpy as np
 
+from pose_controller.control import MediaStatus
 from pose_controller.web import DashboardServer, DashboardState
 from pose_controller.web.dashboard import MAX_EVENTS
 
@@ -82,6 +83,38 @@ def test_stream_endpoint_serves_multipart_jpeg_with_pending_frame():
         chunk = resp.read(64)
         assert chunk.startswith(b"--posecontrollerframe")
         conn.close()
+    finally:
+        server.stop()
+
+
+def test_dashboard_state_media_status_defaults_to_unavailable():
+    state = DashboardState()
+
+    status = state.get_media_status()
+
+    assert status.available is False
+    assert status.backend_name == "none"
+
+
+def test_media_endpoint_returns_updated_status_as_json():
+    state, server = _start_server_with_frame()
+    try:
+        state.update_media_status(
+            MediaStatus(available=True, backend_name="playerctl", playing=True, title="Song", artist="Artist")
+        )
+
+        with urllib.request.urlopen(f"http://127.0.0.1:{server.port}/media") as resp:
+            assert resp.status == 200
+            assert resp.headers["Content-Type"] == "application/json"
+            body = json.loads(resp.read().decode("utf-8"))
+
+        assert body == {
+            "available": True,
+            "backend": "playerctl",
+            "playing": True,
+            "title": "Song",
+            "artist": "Artist",
+        }
     finally:
         server.stop()
 

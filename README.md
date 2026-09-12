@@ -16,7 +16,10 @@ NPU. See `docs/architecture.md` for the pipeline design and
 narrative retrospective of how this project got built -- what broke, what
 each break taught the next decision, and where the real (non-obvious)
 findings came from. It's the readable version of the detailed logs in
-`scripts/qnn_spike.md` and `docs/backlog.md`.
+`scripts/qnn_spike.md` and `docs/backlog.md`. **Want the current state of
+each on-device pipeline instead of the story?** `docs/pipelines.md` has a
+flow diagram and every real measured performance number for each of the
+three `inference.backend` options, on every board tested.
 
 **Stretch goal:** keep the whole system (OS, code, deps, models) small
 enough to fit comfortably on a 32GB eMMC/UFS module -- see
@@ -53,23 +56,27 @@ been triggered correctly from a real person's real arm movements, though
 reliability still varies with detection hit-rate and camera framing on
 harder footage (see `docs/backlog.md`).
 
-A local browser dashboard (`web/`) streams the live overlay feed plus a
-gesture-trigger queue -- off by default (`OverlayConfig.web_enabled`),
-for demos and debugging without a manual capture/scp/inspect cycle.
+A local browser dashboard (`web/`) streams the live overlay feed, a
+gesture-trigger queue, and (when media control is enabled) a now-playing
+status panel -- off by default (`OverlayConfig.web_enabled`), for demos
+and debugging without a manual capture/scp/inspect cycle.
 
-Not yet implemented: media control (`gestures.ControlAction`s currently
-print and show in the overlay/dashboard; nothing drives Spotify/a player
-yet). Known open gaps, tracked in `docs/backlog.md`: the CPU dev backend
-is still single-person, the re-ID threshold's false-merge risk is
-unvalidated against real multi-person footage, some tracking-identity
-instability may still trace back to camera framing (two alternate
-landmark pipelines, YOLO26-Pose and HRNetPose, are being built alongside
-the current one to help isolate this -- both compile and run on real
-Hexagon NPU hardware, YOLO26-Pose via Ultralytics' own QNN export after
-Qualcomm AI Hub's failed to compile it, but neither is validated on real
-footage yet), and the
-handedness assumption in `gestures/normalize.py` has held up in every
-real test so far but is still worth watching.
+Media control (`control/`) drives a real player via `playerctl` (Linux
+D-Bus MPRIS -- works against Spotify's official Linux client or any
+other MPRIS-compliant player), off by default
+(`control.enabled`) and **not yet validated against a real player or
+real hardware** -- see `docs/backlog.md`. Other known open gaps, also
+tracked there: the CPU dev backend is still single-person, the re-ID
+threshold's false-merge risk is unvalidated against real multi-person
+footage, some tracking-identity instability may still trace back to
+camera framing (two alternate landmark pipelines, YOLO26-Pose and
+HRNetPose, are being built alongside the current one to help isolate
+this -- both compile and run on real Hexagon NPU hardware, YOLO26-Pose
+via Ultralytics' own QNN export after Qualcomm AI Hub's failed to
+compile it; tested against real single-person footage with promising
+results, see `docs/backlog.md`), and the handedness assumption in
+`gestures/normalize.py` has held up in every real test so far but is
+still worth watching.
 
 ## Setup (dev loop, laptop with a webcam)
 

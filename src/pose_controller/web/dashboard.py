@@ -1,5 +1,6 @@
-"""Lightweight local web dashboard: streams the live overlay frame and a
-gesture-trigger queue to a browser, for demos, debugging, and pipeline
+"""Lightweight local web dashboard: streams the live overlay frame, a
+gesture-trigger queue, and (if `control.enabled`) the connected media
+player's status, to a browser, for demos, debugging, and pipeline
 iteration -- see docs/backlog.md for why this exists (every finding this
 project made about exposure, orientation, ROI tuning, and re-ID
 thresholds went through a manual capture-on-device -> scp -> inspect
@@ -29,6 +30,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import numpy as np
+
+from pose_controller.control import MediaStatus
 
 MAX_EVENTS = 100  # gesture queue history kept for late-joining/refreshing browser tabs
 MJPEG_BOUNDARY = "posecontrollerframe"
@@ -67,17 +70,39 @@ _INDEX_HTML = """<!doctype html>
   .event .track { color: #8a8f98; margin-right: 6px; }
   .event .action { font-weight: 600; color: #4ade80; }
   #empty { color: #5a5f68; font-size: 13px; }
+  #media-pane {
+    padding: 12px 14px; margin-bottom: 14px; background: #1b1f24;
+    border-radius: 6px; box-sizing: border-box;
+  }
+  #media-pane h1 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: #8a8f98; margin: 0 0 8px;
+  }
+  #media-status { display: flex; align-items: center; font-size: 13px; }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; flex-shrink: 0;
+  }
+  .dot-offline { background: #5a5f68; }
+  .dot-paused { background: #eab308; }
+  .dot-playing { background: #4ade80; }
+  #media-track { font-size: 12px; color: #8a8f98; margin-top: 6px; }
+  #media-track .title { color: #e8e8e8; }
 </style>
 </head>
 <body>
   <div id="video-pane"><img src="/stream" alt="Live overlay feed"></div>
   <div id="queue-pane">
+    <div id="media-pane">
+      <h1>Media Control</h1>
+      <div id="media-status"><span class="dot dot-offline"></span><span id="media-text">Not connected</span></div>
+      <div id="media-track"></div>
+    </div>
     <h1>Gesture Queue</h1>
     <div id="events"><div id="empty">Waiting for gestures...</div></div>
   </div>
 <script>
 let lastLen = -1;
-async function poll() {
+async function pollEvents() {
   try {
     const res = await fetch("/events");
     const events = await res.json();
@@ -98,9 +123,36 @@ async function poll() {
   } catch (err) {
     // Server not ready yet, or a transient connection hiccup -- just retry.
   }
-  setTimeout(poll, 500);
+  setTimeout(pollEvents, 500);
 }
-poll();
+function escapeHtml(s) {
+  return s.replace(/[&<>]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]; });
+}
+async function pollMedia() {
+  try {
+    const res = await fetch("/media");
+    const m = await res.json();
+    const dot = document.querySelector("#media-status .dot");
+    const text = document.getElementById("media-text");
+    const track = document.getElementById("media-track");
+    if (!m.available) {
+      dot.className = "dot dot-offline";
+      text.textContent = m.backend === "none" ? "Media control disabled" : "No player found";
+      track.textContent = "";
+    } else {
+      dot.className = m.playing ? "dot dot-playing" : "dot dot-paused";
+      text.textContent = m.playing ? "Playing" : "Paused";
+      track.innerHTML = m.title
+        ? '<span class="title">' + escapeHtml(m.title) + "</span>" + (m.artist ? " -- " + escapeHtml(m.artist) : "")
+        : "";
+    }
+  } catch (err) {
+    // Server not ready yet, or a transient connection hiccup -- just retry.
+  }
+  setTimeout(pollMedia, 2000);
+}
+pollEvents();
+pollMedia();
 </script>
 </body>
 </html>
@@ -117,6 +169,7 @@ class DashboardState:
         self._frame_jpeg: bytes | None = None
         self._frame_version = 0
         self._events: deque[dict[str, Any]] = deque(maxlen=MAX_EVENTS)
+        self._media_status = MediaStatus(available=False, backend_name="none")
 
     def update_frame(self, frame_bgr: np.ndarray) -> None:
         """Encode and store the latest overlay frame. Call this once per
@@ -148,6 +201,19 @@ class DashboardState:
         with self._lock:
             return list(self._events)
 
+    def update_media_status(self, status: MediaStatus) -> None:
+        """Call once per loop iteration with `MediaController.get_status()`
+        -- cheap (a lock-protected attribute read on the controller side,
+        no subprocess call), so per-frame is fine even though the
+        underlying player status only actually changes every couple of
+        seconds (`control.backends.playerctl`'s own poll interval)."""
+        with self._lock:
+            self._media_status = status
+
+    def get_media_status(self) -> MediaStatus:
+        with self._lock:
+            return self._media_status
+
 
 def _make_handler(state: DashboardState) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
@@ -161,6 +227,8 @@ def _make_handler(state: DashboardState) -> type[BaseHTTPRequestHandler]:
                 self._serve_stream()
             elif self.path == "/events":
                 self._serve_events()
+            elif self.path == "/media":
+                self._serve_media()
             else:
                 self.send_error(404)
 
@@ -174,6 +242,23 @@ def _make_handler(state: DashboardState) -> type[BaseHTTPRequestHandler]:
 
         def _serve_events(self) -> None:
             body = json.dumps(state.get_events()).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _serve_media(self) -> None:
+            status = state.get_media_status()
+            body = json.dumps(
+                {
+                    "available": status.available,
+                    "backend": status.backend_name,
+                    "playing": status.playing,
+                    "title": status.title,
+                    "artist": status.artist,
+                }
+            ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))

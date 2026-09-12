@@ -8,6 +8,7 @@ import cv2
 
 from pose_controller.capture import Camera, assess_exposure
 from pose_controller.config import AppConfig, InferenceConfig, OverlayConfig, TrackingConfig
+from pose_controller.control import build_media_controller
 from pose_controller.gestures import ArmPose, GestureStateMachine
 from pose_controller.inference.backends import build_pose_estimator
 from pose_controller.inference.pose import PoseResult
@@ -176,6 +177,7 @@ def run(config: AppConfig) -> None:
     gestures = GestureStateMachine()
     dashboard_state, dashboard_server = build_dashboard(config.overlay)
     detect_overlay = build_detect_overlay(config.overlay, config.inference)
+    media_controller = build_media_controller(config.control)
 
     banner_text: str | None = None
     banner_frames_remaining = 0
@@ -204,6 +206,7 @@ def run(config: AppConfig) -> None:
                 print(f"[gesture] #{track_id}: {action.name}")
                 banner_text = f"#{track_id}: {action.name}"
                 banner_frames_remaining = ACTION_BANNER_FRAMES
+                media_controller.dispatch(action)
                 if dashboard_state is not None:
                     dashboard_state.add_event(track_id, action.name)
 
@@ -237,6 +240,7 @@ def run(config: AppConfig) -> None:
 
             if dashboard_state is not None:
                 dashboard_state.update_frame(frame)
+                dashboard_state.update_media_status(media_controller.get_status())
 
             if config.overlay.show_window:
                 cv2.imshow(config.overlay.window_name, frame)
@@ -247,6 +251,7 @@ def run(config: AppConfig) -> None:
         pose_estimator.close()
         if detect_overlay is not None:
             detect_overlay.close()
+        media_controller.close()
         cv2.destroyAllWindows()
         if dashboard_server is not None:
             dashboard_server.stop()

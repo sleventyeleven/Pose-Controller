@@ -95,11 +95,33 @@ class TrackingConfig:
 
 
 @dataclass
+class ControlConfig:
+    # Media control (control/media_controller.py) driven by
+    # gestures.ControlAction triggers -- the piece explicitly deferred
+    # when ControlAction was first introduced ("that's control/'s job,
+    # not yet built" -- see gestures/types.py). Off by default, matching
+    # every other optional feature in this config: a triggered gesture
+    # shouldn't start sending real media-key commands to whatever player
+    # happens to be running just because the app started.
+    enabled: bool = False
+    # "playerctl" (control/backends/playerctl.py) is the only backend so
+    # far -- emulates OS media keys via D-Bus MPRIS, works against
+    # Spotify's official Linux client or any other MPRIS-compliant
+    # player, no Spotify-specific code or network-facing API needed for
+    # the trigger path itself. Requires `sudo apt install playerctl` on
+    # the device; not yet validated against a real player.
+    backend: str = "playerctl"
+    # Fraction of full volume applied per VOLUME_UP/VOLUME_DOWN trigger.
+    volume_step: float = 0.05
+
+
+@dataclass
 class AppConfig:
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
+    control: ControlConfig = field(default_factory=ControlConfig)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "AppConfig":
@@ -109,4 +131,5 @@ class AppConfig:
             inference=InferenceConfig(**data.get("inference", {})),
             overlay=OverlayConfig(**data.get("overlay", {})),
             tracking=TrackingConfig(**data.get("tracking", {})),
+            control=ControlConfig(**data.get("control", {})),
         )
