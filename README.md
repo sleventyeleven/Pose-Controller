@@ -37,10 +37,25 @@ initial ~476ms-per-frame subprocess approach later replaced by a
 persistent-session one, and a gated-dataset blocker on OSNet's official
 quantization path that led to running it unquantized on CPU instead).
 
-Not yet implemented: gesture recognition and media control. Known gaps
-tracked in `docs/backlog.md`, notably: the CPU dev backend is still
-single-person, and the re-ID similarity threshold is a starting guess,
-not tuned against real multi-person footage.
+Gesture recognition (`gestures/`) is implemented: per-track pose
+normalization, static arm-pose classification (down/raised/out-to-side,
+debounced), a one-armed overhead sweep detector, and a state machine
+mapping to `ControlAction`s (right-out -> NEXT, left-out -> PREVIOUS,
+both-raised -> PLAY_PAUSE, sweep -> SKIP), all edge-triggered so holding
+a pose doesn't repeat-fire. The overlay shows each person's current arm
+states and a banner for the most recently triggered action, satisfying
+the project's causality requirement. Validated with extensive unit tests
+and a sanity check against real (not synthetic) detected keypoints, but
+**not yet with a live camera actually performing the gestures** -- see
+`docs/backlog.md`.
+
+Not yet implemented: media control (`gestures.ControlAction`s currently
+just print and show in the overlay; nothing drives Spotify/a player
+yet). Other known gaps tracked in `docs/backlog.md`, notably: the CPU dev
+backend is still single-person, the re-ID similarity threshold is a
+starting guess not tuned against real footage, and the handedness
+assumption in `gestures/normalize.py` (MediaPipe's L/R landmarks are
+anatomical, not mirrored) is unverified against a live camera.
 
 ## Setup (dev loop, laptop with a webcam)
 

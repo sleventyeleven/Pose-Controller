@@ -78,7 +78,7 @@ class Tracker:
         max_age: int = 30,
         min_hits: int = 1,
         embedder: ReidEmbedder | None = None,
-        reid_similarity_threshold: float = 0.6,
+        reid_similarity_threshold: float = 0.5,
         reid_gallery_ttl: int = 300,
     ):
         """
@@ -96,8 +96,14 @@ class Tracker:
         reid_similarity_threshold: minimum cosine similarity (embeddings
             are L2-normalized, so this is a dot product in [-1, 1]) between
             a new detection and a lost track's last embedding to revive
-            that track's ID. Not empirically tuned against a benchmark --
-            a reasonable starting point (see docs/backlog.md).
+            that track's ID. Tuned against real recorded footage (see
+            scripts/qnn_spike.md): the original 0.6 default sat above real
+            same-person similarity dips seen in practice (as low as 0.5946
+            for a <2s gap, 0.5290 across the full video), fragmenting one
+            continuous person into several track_ids; 0.5 sits just below
+            that measured floor. Not validated against real multi-person
+            footage -- a lower threshold trades some false-merge risk
+            between genuinely different people for this robustness.
         reid_gallery_ttl: additional frames (beyond `max_age`) a track's
             embedding is kept in the "lost gallery" for possible revival
             before being forgotten entirely. Default 300 at ~15-30fps is

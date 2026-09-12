@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-specific: scratch build/debug output, not source
+export_assets/
+*.pt
+scratch_csi/

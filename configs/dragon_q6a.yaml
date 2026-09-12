@@ -10,6 +10,7 @@ capture:
 inference:
   backend: qnn
   model_dir: models/mediapipe_pose_qcs6490
+  detector_model_dir: models/yolov8n_det_qcs6490
 
 overlay:
   show_window: true

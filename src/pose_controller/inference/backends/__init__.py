@@ -12,5 +12,7 @@ def build_pose_estimator(config: InferenceConfig) -> PoseEstimator:
     if config.backend == "qnn":
         from .qnn import QnnPoseEstimator
 
-        return QnnPoseEstimator(model_dir=config.model_dir)
+        return QnnPoseEstimator(
+            model_dir=config.model_dir, detector_model_dir=config.detector_model_dir
+        )
     raise ValueError(f"Unknown inference backend: {config.backend!r}")

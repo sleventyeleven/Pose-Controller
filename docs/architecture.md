@@ -24,14 +24,23 @@ the Q6A:
     API's own limitation) -- not yet upgraded to MediaPipe's newer
     multi-person Tasks API since the real multi-person target is the QNN
     backend; see `docs/backlog.md`.
-  - `qnn.py` -- `QnnPoseEstimator`, on-device via a BlazePose
-    detector+landmark model pair running on the Q6A's Hexagon NPU through
-    `onnxruntime`'s QNN execution provider (`_qnn_runtime.OnnxQnnRunner`).
-    **Genuinely multi-person**: `_blazepose.py` runs real greedy NMS over
-    the detector's anchor-based output (not just top-1) and evaluates the
-    landmark model once per surviving detection, up to `MAX_PERSONS`.
-    Validated on physical hardware with 2 simultaneous people at
-    ~15-20ms/frame total -- see `scripts/qnn_spike.md`.
+  - `qnn.py` -- `QnnPoseEstimator`, on-device via a two-model pipeline on
+    the Q6A's Hexagon NPU through `onnxruntime`'s QNN execution provider
+    (`_qnn_runtime.OnnxQnnRunner`): a YOLOv8n person detector
+    (`_yolo_detect.py`, 640x640 input) locates people, then BlazePose's
+    landmark model (`_blazepose.py`) produces keypoints per detected box
+    (`_blazepose.detect_poses_from_boxes`). BlazePose's own bundled
+    detector (128x128 input) was replaced for localization specifically
+    because it was found to lose small/distant subjects at ordinary room
+    camera-to-subject distance regardless of image quality -- see
+    `scripts/qnn_spike.md`. **Genuinely multi-person**: `_yolo_detect.py`
+    runs real NMS over the detector's per-anchor output (not just top-1)
+    and the landmark model runs once per surviving person box, up to
+    `MAX_PERSONS`. Validated on physical hardware against a known-good
+    reference photo (both people detected and landmarked with high
+    confidence) and against real captured frames -- still an active
+    tuning area for landmark confidence on some real-world crops, see
+    `docs/backlog.md`.
 - **tracking/** -- `Tracker.update(detections, frame_bgr) -> detections`
   (with `track_id` populated). Two layers:
   - Position/motion (always on): a constant-velocity Kalman filter per
@@ -50,29 +59,55 @@ the Q6A:
     not just brief occlusion. Validated on physical hardware: a person
     revived with their original ID after "disappearing" and reappearing
     at a completely different position. See `scripts/qnn_spike.md`.
-- **gestures/** (milestone 4, not yet built) -- per-track pose
-  normalization (scale by shoulder width, center on torso, correct
-  handedness so left/right is anatomical to the person rather than
-  mirrored screen-left/right), a static-pose classifier (arm up/out via
-  joint angles, debounced), and a dynamic-gesture recognizer for the
-  overhead sweep via wrist trajectory.
+- **gestures/** -- `normalize.normalize_pose` converts raw keypoints into
+  shoulder-width-scaled, shoulder-relative coordinates so gesture
+  thresholds work regardless of distance from camera or position in
+  frame. `static_poses.classify_arm` turns that into `ArmPose.{DOWN,
+  RAISED, OUT_TO_SIDE}` per arm -- "outward" is defined relative to each
+  shoulder's own offset from torso center (not a hardcoded image
+  direction), so it's correct regardless of which side of the image a
+  given arm appears on; MediaPipe's landmark schema already labels
+  LEFT_*/RIGHT_* by the subject's own anatomical left/right (not
+  mirrored), so no separate handedness-correction step is needed on top
+  -- see `normalize.py`'s module docstring for the reasoning and the
+  escape hatch if real-camera testing ever shows this assumption wrong.
+  `dynamic_gestures.SweepDetector` tracks one wrist's rolling-window
+  trajectory to detect a one-armed overhead sweep. `state_machine.
+  GestureStateMachine` ties it together per track_id: debounces static
+  poses (`DEBOUNCE_FRAMES` consecutive frames, tolerating momentary
+  occlusion) and edge-triggers `ControlAction`s (right-out -> NEXT,
+  left-out -> PREVIOUS, both-raised -> PLAY_PAUSE, sweep -> SKIP).
+  Validated against real detected keypoints (not just synthetic test
+  data) and extensively unit-tested; **also validated end-to-end against
+  real recorded footage** running the full `estimate -> track -> gesture`
+  loop over every frame -- all four actions (NEXT, PREVIOUS, PLAY_PAUSE,
+  SKIP) triggered correctly from a real person's arm movements, though
+  reliability is still limited by detection-hit-rate/tracking-continuity
+  on harder footage, not the gesture logic itself -- see
+  `docs/backlog.md`.
 - **control/** (milestone 6, not yet built) -- `MediaController`
-  abstraction (play/pause/next/previous/volume). First backend emulates OS
-  media keys / Linux D-Bus MPRIS against whatever player is already
-  running and authenticated, which decouples the offline vision pipeline
-  from Spotify's own auth/streaming requirements.
-- **overlay/** -- `draw_poses` renders skeleton + track-ID label per
-  person, color-keyed by `track_id` so identity is visible at a glance
-  across multiple people. Pose-state/in-progress-gesture/last-action
-  overlays arrive with milestone 4's gesture logic.
+  abstraction (play/pause/next/previous/volume) that would actually carry
+  out a `gestures.ControlAction`. First backend emulates OS media keys /
+  Linux D-Bus MPRIS against whatever player is already running and
+  authenticated, which decouples the offline vision pipeline from
+  Spotify's own auth/streaming requirements. For now, `app.py` just
+  prints triggered actions and shows them in the overlay banner.
+- **overlay/** -- `draw_poses` renders skeleton + track-ID + each
+  person's current confirmed arm states (e.g. "L:- R:OUT"), color-keyed
+  by `track_id`; `draw_action_banner` shows the most recently triggered
+  action for a few seconds. Together these are the causality
+  requirement: a viewer sees an arm state building up *before* the
+  action it triggers, not just the action appearing with no visible
+  cause.
 - **app.py + config.py** -- orchestrates the pipeline loop (capture ->
-  `PoseEstimator.estimate` -> `Tracker.update` -> `draw_poses`).
-  `AppConfig` loads from YAML (`configs/dev_laptop.yaml` vs
-  `configs/dragon_q6a.yaml`), so switching hardware is a config change,
-  not a code change.
+  `PoseEstimator.estimate` -> `Tracker.update` -> `GestureStateMachine.
+  update_all` -> `draw_poses` + `draw_action_banner`). `AppConfig` loads
+  from YAML (`configs/dev_laptop.yaml` vs `configs/dragon_q6a.yaml`), so
+  switching hardware is a config change, not a code change.
 
-Current status: milestones 1-3 are in place (scaffolding, capture +
-pose baseline, multi-person detection + tracking). Gestures, overlay
-causality UI beyond basic skeleton+ID, and media control are not yet
-implemented. See `scripts/qnn_spike.md` and `docs/backlog.md` for the
+Current status: milestones 1-4 are in place (scaffolding, capture + pose
+baseline, multi-person detection + tracking with re-ID, gesture
+recognition). Media control (actually driving Spotify/a player) is not
+yet implemented -- gestures currently only print/display what they'd
+trigger. See `scripts/qnn_spike.md` and `docs/backlog.md` for the
 detailed trail of what it took to get the QNN backend working and fast.

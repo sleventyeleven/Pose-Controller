@@ -297,3 +297,452 @@ unmatched detections are checked against that gallery by cosine
 similarity before a fresh ID is allocated. `reid_similarity_threshold`
 (default 0.6) is a reasonable starting point, not empirically tuned
 against a benchmark -- see `docs/backlog.md`.
+
+## Milestone 4: live-camera gesture testing investigation (2026-09-12)
+
+Attempted to validate gesture recognition end-to-end with the physical
+Nexigo webcam on the Q6A. Never got past the pose-detection stage --
+every real webcam frame tried produced the same degenerate signature
+seen during the original NHWC layout bug earlier in this log: flat
+~0.5 confidence scores, effectively tied across anchors, indicating the
+model is seeing something structurally different from what it was
+calibrated against (not just "a hard image").
+
+**Setup issues found and fixed first** (mundane, but cost real time):
+- `cv2.VideoCapture` with the default (GStreamer) backend failed to open
+  the webcam at all -- "not a capture device" / "Internal data stream
+  error". Forcing `cv2.VideoCapture(<index>, cv2.CAP_V4L2)` fixed it.
+- The webcam's V4L2 device index moved after the r2 image reflash --
+  `/dev/video0`/`1` are now claimed by the `qcom-venus` hardware
+  encoder/decoder, not the webcam. Found the real index by checking
+  `/sys/class/video4linux/video*/name` (webcam ended up at
+  `/dev/video2`/`3`).
+
+**Ruled out as the detection failure's cause:**
+- *Orientation/aspect ratio.* A forced-landscape known-good reference
+  image still scored 0.99 fine, so portrait vs. landscape framing isn't
+  it.
+- *A `resize_pad`/preprocessing shape bug.* Manually inspected the
+  128x128x3 model input tensor after preprocessing a live frame -- shape
+  was correct, and visually it was clearly a recognizable person, not
+  garbage or a wrongly-sliced buffer.
+- *Simple darkness*, for the first failed capture specifically (dim room,
+  camera pointed steeply upward -- mean grayscale brightness 48.5).
+  Synthetically darkening the known-good reference image step by step
+  only broke detection down around mean brightness ~19-28, well below
+  48.5, so darkness alone doesn't explain this frame's failure.
+- *Motion blur*, also for that first capture. Laplacian variance (a
+  common sharpness/blur proxy) was actually *higher* (601.7) than the
+  known-good reference's (130.0) -- the opposite of what blur would
+  produce. More consistent with sensor noise inflating that metric than
+  with an actual blur problem.
+- **Root cause of this first failure mode is still not identified.**
+
+**Fully diagnosed, second failure mode:** a second attempt used `cheese`
+(GNOME's webcam app) to manually crank brightness/contrast, on the
+theory that the first capture was too dark. The resulting video (saved
+by the user to `/home/radxa/Videos/Webcam/`) also failed detection, but
+this time with a clear, measurable cause: real sensor clipping (8.2% of
+grayscale pixels at or above 250/255) plus near-total desaturation (HSV
+saturation channel mean of 4.35 out of 255, versus 70.7 on the
+known-good reference photo). Tried to recover it in post -- gamma
+correction and synthetic saturation boosting -- neither restored
+detection, confirming the color information was actually destroyed at
+capture time (sensor clipping), not just visually washed out and
+recoverable by reprocessing.
+
+**Outcome:** built `pose_controller.capture.exposure.assess_exposure()`
+(see its module docstring and `tests/test_exposure.py`) to catch this
+second failure mode -- overexposure and desaturation -- as a per-frame,
+cheap (no model inference) warning wired into `app.py`. Confirmed
+correct on both the bad `cheese` capture and the known-good reference.
+It does **not** catch the first failure mode (the dim, upward-angled
+capture technically passes all of its thresholds yet still fails
+detection), so passing this check is necessary but not sufficient
+evidence a frame will actually be detected by the pose model.
+
+Net result: gesture recognition (`gestures/`) remains validated only by
+synthetic unit tests plus one static-photo sanity check -- no live
+camera feed has yet produced a successful pose detection to drive it.
+See `docs/backlog.md` for the up-to-date status and next steps (trying
+camera positions/lighting between these two failure extremes; building
+an auto-exposure-adjustment control loop once a working configuration
+is found by hand).
+
+## CSI camera bring-up and the real root cause of the detection failures (2026-09-12)
+
+Continuing the live-camera investigation above, tried the Dragon Q6A's
+onboard CSI camera connector as an alternative to the Nexigo USB webcam,
+on the theory that a different sensor/pipeline might sidestep whatever
+was wrong with the Nexigo captures.
+
+**Getting the CSI camera working at all required enabling a disabled
+device-tree overlay.** Out of the box the CSI camera produced literally
+nothing: no `/dev/video*` node, no CSI/sensor lines anywhere in `dmesg`
+or `journalctl`, and no matching I2C address on any bus -- the kernel
+wasn't even trying to probe it, which is a very different (and more
+fundamental) problem than "detection is unreliable". The board ships
+`rsetup` (`/usr/bin/rsetup`), a Radxa-provided config tool, and its
+overlays live in `/boot/dtbo/*.dtbo.disabled` until enabled. The exact
+overlay for this hardware exists:
+`qcs6490-radxa-dragon-q6a-cam1-radxa-camera-4k.dtbo` -- contradicting the
+original project plan's assumption that this camera's Dragon Q6A
+compatibility was unconfirmed; Radxa does ship board-specific support for
+it, it's just off by default. Enabled it with
+`sudo rsetup enable_overlays qcs6490-radxa-dragon-q6a-cam1-radxa-camera-4k.dtbo`
+(which strips `.disabled` and runs `u-boot-update`) and rebooted. After
+that, a Sony **IMX415** sensor showed up fully bound to its kernel driver
+at I2C address `16-001a`, with a complete `qcom-camss` media graph
+(`msm_csiphy0` -> `msm_csid0` -> `msm_vfe0_rdi0` -> `/dev/video2`) visible
+via `media-ctl -d /dev/media1 -p`.
+
+**This is Qualcomm's mainline CAMSS ISP stack, not a plug-and-play UVC
+device** -- unlike the Nexigo, nothing streams until the media graph's
+links are explicitly created and the sensor's native format is
+propagated down every pad:
+```
+media-ctl -d /dev/media1 -l '"msm_csiphy0":1 -> "msm_csid0":0[1]'
+media-ctl -d /dev/media1 -l '"msm_csid0":1 -> "msm_vfe0_rdi0":0[1]'
+media-ctl -d /dev/media1 -V '"imx415 16-001a":0 [fmt:SGBRG10_1X10/3864x2192]'
+media-ctl -d /dev/media1 -V '"msm_csiphy0":0 [fmt:SGBRG10_1X10/3864x2192]'
+media-ctl -d /dev/media1 -V '"msm_csiphy0":1 [fmt:SGBRG10_1X10/3864x2192]'
+media-ctl -d /dev/media1 -V '"msm_csid0":0 [fmt:SGBRG10_1X10/3864x2192]'
+media-ctl -d /dev/media1 -V '"msm_csid0":1 [fmt:SGBRG10_1X10/3864x2192]'
+media-ctl -d /dev/media1 -V '"msm_vfe0_rdi0":0 [fmt:SGBRG10_1X10/3864x2192]'
+v4l2-ctl -d /dev/video2 --set-fmt-video=width=3864,height=2192,pixelformat=pGAA
+```
+`/dev/video2` is an RDI (Raw Data Interface) node -- it hands back raw,
+undemosaiced 10-bit Bayer data packed MIPI-style (4 pixels per 5 bytes),
+not a finished BGR/YUV frame. Unpacking it needs a manual bit-unpack
+(shift each of 4 bytes left 2 and OR in 2 bits from a shared 5th byte),
+then `cv2.cvtColor(img8, cv2.COLOR_BayerGB2BGR)` to debayer (`pGAA` =
+GBRG Bayer order, confirmed against the sensor's own reported format).
+The result is very green-dominant straight out of the debayer step --
+expected for raw Bayer data (2x as many green photosites as red/blue per
+2x2 block) with no white balance applied -- fixed with a simple
+gray-world white balance (scale R and B channels so their means match
+G's mean). The sensor's own auto-exposure is also bypassed entirely in
+raw RDI mode -- the first captured frame was far too dark (mean
+brightness ~16/255) until `analogue_gain` was manually pushed up via
+`v4l2-ctl -d /dev/v4l-subdev27 --set-ctrl=analogue_gain=80` (out of a
+0-100 range; `exposure` was already at its max default of 2242 and isn't
+the useful lever here). After gain + white balance, the resulting image
+was genuinely clean: correct color, real detail (a shelving unit, boxes,
+a light fixture rendered without blowing out), brightness ~62-72/255,
+saturation ~43-101 -- comfortably past every threshold in
+`capture.exposure.assess_exposure`. (The image also comes out rotated
+90 degrees from the physical mounting orientation -- cosmetic, trivially
+fixed with `cv2.rotate`, and confirmed not to matter to the detector.)
+
+**And it still failed detection, with the identical flat-0.5 signature.**
+This was the decisive test: a different sensor, a completely different
+capture pipeline, definitively good exposure/color/sharpness, a person
+clearly visible with an arm raised -- same failure as the Nexigo. That
+ruled out camera hardware and exposure as the cause across the board.
+
+Captured a 30-frame sequence (roughly 1 fps over 30 seconds, while a
+person moved in and out of frame and performed gestures) and ran every
+frame through the real `QnnPoseEstimator._run_detector()` path. All 30
+frames scored an identical flat 0.5 (raw logit exactly 0.0) despite
+brightness varying frame to frame (~66-76/255) -- strong evidence this
+wasn't a per-frame fluke.
+
+Comparing raw (pre-sigmoid) detector logits against a known-good demo
+image was the key diagnostic: the demo image has 4 anchors sitting at a
+confident **+4.83** logit; every failing real frame's best anchor never
+rose above **0.0**, even on a frame with an unmistakable, well-lit person
+in it. Taking that exact frame and cropping tightly around the person
+(from the full ~3864x2192 sensor frame down to roughly a 1600x1700 region
+centered on them) and re-running the identical detector code produced a
+raw logit of **+4.833** -- matching the demo image's confident value
+almost exactly -- with `max_score=0.9921` and a full pose returned.
+
+**Root cause: the person detector (BlazePose's first stage) needs the
+subject to occupy a meaningfully large fraction of the frame, and at
+normal room distance with either camera's field of view, they don't.**
+Both the Nexigo and the CSI/IMX415 have wide-ish fields of view suited to
+"webcam at a desk, person nearby" or general-purpose framing -- not the
+tighter framing MediaPipe's detector was implicitly tuned against
+(closer to selfie/portrait distance). Once a full room-distance frame is
+downscaled to the detector's fixed 128x128 input (a ~30x shrink for the
+CSI camera's native resolution), the person becomes too small a
+silhouette for the detector's anchors to register, independent of how
+sharp, well-exposed, or well-colored the source frame is. This also
+retroactively explains round 1's Nexigo failure from earlier in this log
+(dim, upward-angled capture, root cause originally left as "not
+identified") -- it was very likely this same framing issue the whole
+time, just investigated before this crop test existed to reveal it.
+
+**Not yet fixed, only diagnosed.** The crop-and-retest above was a manual
+diagnostic, not a pipeline change. See `docs/backlog.md` for the concrete
+options going forward (move the camera closer, add a fixed center-crop/
+digital zoom tuned to the expected interaction distance, or treat
+"stand closer to the camera" as a real operating constraint of this
+project) -- none are implemented yet.
+
+## Milestone 4 follow-up: YOLOv8n-det as the first-stage detector (2026-09-12)
+
+Per the finding above, replaced BlazePose's own 128x128 detector with a
+YOLOv8n person detector as the pipeline's first stage, keeping BlazePose's
+landmark model unchanged for the actual keypoints -- this is what the
+original milestone-1 plan called for from the start (a separate
+higher-resolution person detector feeding a per-crop pose model), never
+implemented until now.
+
+**Export.** `qai_hub_models.models.yolov8_det.export`, same
+`precompiled_qnn_onnx` / `w8a8` / `qcs6490` recipe as the pose models.
+Needed extra dev-machine-only packages beyond the base `[hub]` extra:
+`ultralytics` (the model definition itself imports it -- absent from
+`qai_hub_models`' own dependency list), and `aiofiles` + `pycocotools`
+(both surfaced only once quantization tried to download and load COCO
+calibration data -- `pip install`-able wheels for both, no build toolchain
+needed on Windows). Real device profiling (Dragonwing RB3 Gen 2 Vision
+Kit, the QCS6490 dev kit): **4.6ms inference, 254/254 ops on NPU** (0
+GPU/CPU fallback).
+
+**The exported model's outputs needed direct verification, not
+assumption** -- Radxa's own QCS6490 deployment notes for this exact model
+(a sibling board, Airbox Q900) warn of a real quirk: some exports return
+outputs ordered `[scores, class_idx, boxes]` instead of the expected
+`[boxes, scores, class_idx]`. Checked via `onnx.load()` against the actual
+downloaded graph rather than trusting either ordering: this export's
+graph order was `boxes, scores, class_idx` as expected, and all three are
+uint8 with real `QuantizeLinear`/`DequantizeLinear` nodes carrying
+scale/zero_point as graph initializers -- readable directly via `onnx`,
+no `qnn-context-binary-utility` round-trip needed (unlike the mediapipe
+models, whose I/O quantization lives only in the opaque compiled context
+binary, not the ONNX graph itself). One value needed a judgment call:
+`class_idx`'s graph-declared scale was exactly **0.0**, which taken
+literally would dequantize every value to 0 regardless of the raw byte --
+not a plausible real quantization scale for an 80-class index. Treated as
+an exporter formality for smuggling an integer output through a uint8 QDQ
+wrapper and used `scale=1.0, offset=0.0` (pure passthrough) instead --
+confirmed correct on-device (a person in frame reliably decodes to
+`class_idx == 0`, not a garbage float). Since `_yolo_detect.py`/`qnn.py`
+look outputs up by name (via `OnnxQnnRunner`'s dict-keyed `run()`), the
+Radxa-documented reordering quirk wouldn't have mattered even if this
+export had exhibited it.
+
+**Architecture:** `_blazepose.py` gained `_roi_corners_from_box` (an
+axis-aligned square ROI from a plain xyxy box, no rotation cue available
+the way BlazePose's own aux-keypoint-derived `_compute_roi_corners` has
+one) and `detect_poses_from_boxes` (skips BlazePose's detector entirely,
+runs the landmark model against externally-supplied boxes). The
+shared crop-and-infer logic was factored out of `_landmarks_for_keypoints`
+into `_run_landmark_on_roi` so both ROI paths feed the landmark model
+identically. `_yolo_detect.py` handles YOLO's own pre/post-processing
+(resize/pad, person-class + score filtering, NMS, coordinate unscaling)
+following `qai_hub_models.models.templates.yolo.{model,app}`'s reference
+implementation (score threshold 0.45, NMS IoU 0.7, matching that
+reference's defaults) -- the exported model already does box decoding and
+per-box argmax-over-classes internally (`include_postprocessing=True` at
+export time), so this module only needed score/class filtering + NMS on
+top, not raw anchor decoding.
+
+**Validated against the known-good two-person demo photo used throughout
+this project:** YOLO correctly finds both people; both get landmarked
+with high confidence (0.99 / 0.71) once `BOX_ROI_SCALE` (the margin
+around YOLO's box used to build the landmark model's square crop) was
+tuned from an initial guess of 1.25 up to 1.75 -- 1.25 scored 0.09 for
+both people (fails `MIN_LANDMARK_SCORE`), confirming the landmark model
+needs a generous margin around a person's own bounding box, not just
+"tight box plus a little slack": it was trained on BlazePose's own
+detector's specific ROI convention, not a generic box crop.
+
+**Validated against the real 30-frame CSI capture sequence from the
+earlier framing investigation, and this surfaced a real correction to
+that investigation.** Feeding the sequence through the new detector
+initially got very weak person-class scores (0.01-0.15 typical, one
+outlier at 0.44) -- surprising, since YOLO's 640x640 input was supposed
+to fix exactly this. Rotating one frame through all four cardinal
+orientations isolated the cause immediately: the frames were being fed in
+**portrait** (the CSI capture pipeline's manual rotation script had
+guessed the wrong direction back when this sequence was first processed,
+and it was never corrected since the earlier investigation had moved on
+to other things). Portrait: person-class score 0.070. Landscape (the
+correct orientation, confirmed visually -- door frame and shelving
+upright, not sideways): **0.867**. That is a far bigger swing than image
+quality alone would produce, and it means the earlier "ruled out
+orientation" conclusion (comparing a forced-*landscape squish* of a demo
+photo, which still scored fine) was testing the wrong transformation --
+squishing an aspect ratio and genuinely rotating a person 90 degrees are
+not the same thing, and only the latter was ever a real risk. Orientation
+was likely a meaningful, previously-uncredited contributor to the
+original Nexigo failures earlier in this document too, not just subject
+size.
+
+With orientation corrected, YOLO now finds a person box in **19 of 30**
+frames (up from 0/30 before this integration) -- confirmed, substantial
+progress. But the landmark model's confidence on most of those real
+crops stayed poor, repeatedly landing on almost exactly 0.094 regardless
+of which frame -- suspicious enough to investigate rather than write off
+as "hard photos." One real mechanism found: `BOX_ROI_SCALE=1.75`'s margin,
+tuned against the demo photo, can produce a square ROI taller than the
+camera's own vertical field of view when a person fills most of the
+frame (this capture's person occupied roughly 78% of frame height before
+any margin was even added) -- the ROI then samples out-of-bounds black
+padding rather than real image content along the affected edge, for no
+reason related to the actual pose. Fixed by having `_roi_corners_from_box`
+shift (translate, never resize) the ROI to stay within frame bounds
+whenever it's geometrically possible (i.e. the requested ROI side is
+still smaller than the frame in that dimension). This took one frame from
+0.44 to 0.80 (crossing the threshold, now a full end-to-end success), but
+left most others unchanged -- it's a real, principled fix, just not the
+dominant remaining factor. Final tally: **1 of 30** real frames now
+produce a complete, successful pose end-to-end (up from 0/30 for the
+entire duration of this project's live-camera testing to date).
+
+**Not fully solved.** The repeated near-identical 0.094 landmark score
+across most real frames (as opposed to a spread of varying-difficulty
+values) suggests something more systematic than "some poses are just
+harder" -- suspected but not isolated: the `analogue_gain=80` (out of a
+0-100 range) used during that capture session amplifying real sensor
+noise well beyond what the landmark model saw in training, and/or the
+sequence genuinely being shot mid-motion (walking, gesturing) rather than
+standing still, both plausible without further live-iteration to
+distinguish them. See `docs/backlog.md` for current status.
+
+## Sanity check against the original overexposed Nexigo recording
+
+Went back to the very first piece of evidence in this document's
+overexposure investigation -- the `cheese`-recorded Nexigo video at
+`/home/radxa/Videos/Webcam/2026-09-12-024357.webm` (1920x1080, 30fps,
+34.7s) -- and ran it through the new YOLO+BlazePose pipeline without any
+new capture session, sampling ~1fps (31 frames) via plain
+`cv2.VideoCapture` (no rotation needed -- USB UVC webcams don't have the
+CSI sensor's mounting-orientation problem).
+
+`capture.exposure.assess_exposure` still flags nearly every sampled frame
+(brightness ~170-180, saturation ~4-8) -- nothing about the recording
+changed, it's genuinely still overexposed and desaturated by the same
+measure that originally diagnosed it. Despite that, the new detector
+found a person in **28 of 31 frames (90%)**, and the full detect+landmark
+pipeline succeeded end-to-end on **14 of 31 frames (45%)** -- both a
+dramatic improvement over the 0/31 the old 128x128 detector managed on
+this exact footage. The higher-resolution YOLO detector apparently has
+enough headroom to work through desaturation severe enough to have fully
+blocked the old pipeline, independent of whatever `assess_exposure`
+measures on the frame. This is the single strongest piece of evidence so
+far that the detector swap actually unblocks live-camera gesture
+validation, since it's real previously-recorded footage, not a new
+best-effort capture session.
+
+## Full pipeline validation against real dynamic footage: first live-camera gesture triggers (2026-09-12)
+
+The natural next question: does a ~45% frame-level detection hit rate
+actually translate into real, usable gesture triggers, or is it too
+sparse for `GestureStateMachine`'s 4-consecutive-frame debounce to ever
+confirm anything? Ran the exact `app.py` loop (`PoseEstimator.estimate`
+-> `Tracker.update` -> `GestureStateMachine.update_all`) over all 923
+readable frames of the same `cheese` recording (30fps, person in frame
+for 28.7s), not a synthetic test.
+
+**Without re-ID** (`Tracker()`, IoU/Kalman only): `frames_with_pose=451`
+of 923 (48.9%, consistent with the ~45% sampled estimate above). The
+track_id fragmented into **13 different IDs** across one continuous
+person's screen time -- expected once you look at the miss pattern:
+misses aren't isolated single-frame drops, they come in bursts often
+longer than `max_age` (30 frames = 1s), so the Kalman filter's coast
+couldn't bridge most gaps and a fresh ID got allocated on the other side
+each time. Every fresh ID resets `GestureStateMachine`'s per-track
+debounce state (`_TrackGestureState` starts fresh at DOWN/DOWN), so most
+of the ~30 logged arm-state transitions never had 4 consecutive frames
+within one track to actually confirm. Despite that handicap, **5 real
+actions still fired** (SKIP, NEXT, NEXT, PREVIOUS, SKIP) -- the first
+live-camera-triggered gestures in this project's history, extracted from
+genuinely fragmented, intermittent detection.
+
+**With re-ID enabled** (`Tracker(embedder=ReidEmbedder(...))` --
+milestone 3's appearance-matching feature, built specifically to survive
+a track aging out past `max_age` and reappearing, exactly this
+recording's failure mode): fragmentation dropped from 13 IDs to **4**,
+and triggered actions increased to **6**, now covering **all four**
+required actions for the first time on real footage -- NEXT, PREVIOUS,
+SKIP, and (newly) PLAY_PAUSE (both arms confirmed RAISED
+simultaneously). Re-ID isn't perfect here: the surviving identity
+alternates between two IDs (#3 and #4) rather than settling on one,
+suggesting `reid_similarity_threshold` (0.6) or `reid_gallery_ttl` (300
+frames) could use tuning specifically against high-miss-rate footage
+like this, rather than the cleaner scenarios milestone 3 validated
+against (a track cleanly exiting and re-entering frame). Throughput:
+26.6fps without re-ID, 22.0fps with -- re-ID's per-lost-track embedding
+cost shows up more here than it would on cleaner footage, precisely
+because so many frames trigger a re-match attempt at this hit rate.
+
+**Net effect:** gesture recognition is no longer a purely
+synthetic-plus-one-static-photo validation -- it has now correctly
+triggered every one of the four required actions from a real person's
+real arm movements in real (and notably, still-imperfect: overexposed,
+desaturated, ~49% per-frame miss rate) footage, using the project's
+existing tracker and re-ID machinery with no changes needed. See
+`docs/backlog.md` for the current status and remaining tuning
+opportunities (re-ID threshold/TTL, static-pose/sweep thresholds now
+retunable against real data for the first time).
+
+## Tuning `reid_similarity_threshold` against real footage (2026-09-12)
+
+The `#3`/`#4` alternation above wasn't random -- measured it directly.
+Ran `ReidEmbedder` against every real YOLO-detected box across all 923
+frames of the same `cheese` video (861 successful embeddings) and
+computed cosine similarity for all ~370k pairs, since every pair in a
+single-person video is by definition a same-person comparison:
+
+```
+All-pairs same-person similarity (n=370230):
+  min=0.5290  p1=0.7140  p5=0.7644  median=0.8841  mean=0.8743  max=0.9999
+
+similarity for gaps <2s (n=47352):  min=0.5946  p5=0.7893  median=0.9116
+similarity for gaps >=2s (n=322878): min=0.5290  p5=0.7623  median=0.8806
+```
+
+The old default (`reid_similarity_threshold=0.6`) sits *above* both
+measured floors -- meaning the tracker was correctly, faithfully applying
+its own logic every time it refused to revive a track: on this footage,
+genuine same-person photo pairs really did sometimes score below 0.6,
+most likely from a combination of motion blur, pose change, and this
+video's already-diagnosed desaturation (OSNet leans on color/texture cues
+that a washed-out frame gives it less of). This isn't a bug in the
+tracker or the embedder, it's a threshold picked before any real
+same-person similarity data existed to check it against (the original
+`docs/backlog.md` note called it "not empirically tuned against a
+benchmark -- a reasonable starting point", which turned out to be a
+touch too strict).
+
+Swept `reid_similarity_threshold` in {0.45, 0.50, 0.55, 0.60, 0.65}
+through the real `Tracker` + `GestureStateMachine` pipeline (not just the
+raw embedding math above -- gallery TTL and match-order effects aren't
+fully captured by pairwise stats alone) on the same video:
+
+| threshold | unique track_ids | triggered actions | action types |
+|---|---|---|---|
+| 0.45 | 2 | 6 | all 4 |
+| 0.50 | 2 | 6 | all 4 |
+| 0.55 | 4 | 6 | all 4 |
+| 0.60 (old default) | 4 | 6 | all 4 |
+| 0.65 | 4 | 6 | all 4 |
+
+Gesture-trigger count and type coverage never changed across any
+threshold tested -- confirming gesture *correctness* was never actually
+at risk here, only track-ID stability. 0.45 and 0.50 both collapse
+fragmentation from 4 down to 2 (the remaining 2 IDs are most likely the
+person not being fully in frame during the first ~1.8s, not a re-ID
+failure -- plausible from the timing in the earlier log but not
+separately confirmed). Picked **0.5** over 0.45 since both perform
+identically here: 0.5 sits just below the measured real-world floor
+(0.5290) rather than well below it, the smaller and more defensible
+departure from the original default. Updated in both
+`config.TrackingConfig.reid_similarity_threshold` and
+`tracking.Tracker.__init__`'s own default, confirmed via the real
+`config.py` -> `app.build_tracker` wiring (not just a hardcoded test
+value) reproducing the same 2-track-id / 6-action result.
+
+**Honest limitation:** this project still has no recorded multi-person
+footage, so there's no measured *different*-person similarity
+distribution to weigh against the same-person floor above -- lowering
+the threshold reduces false-*splits* (one person getting multiple IDs)
+but by construction makes false-*merges* (two different people
+collapsing into one ID) somewhat more likely, and that trade's real cost
+is unmeasured. If multi-person testing ever shows incorrect merges,
+`reid_similarity_threshold` is the first place to look, and pushing it
+back toward 0.6 (or higher, now that there's a rationale trail to
+compare a new value against) would be the fix.

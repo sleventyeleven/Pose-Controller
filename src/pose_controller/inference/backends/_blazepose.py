@@ -203,14 +203,15 @@ def _crop_resize_matrix(roi_corners: np.ndarray, output_size_wh: tuple[int, int]
     return cv2.getAffineTransform(roi_corners[:3].astype(np.float32), dst)
 
 
-def _landmarks_for_keypoints(
-    frame_rgb: np.ndarray, keypoints: np.ndarray, landmark_infer: callable
+def _run_landmark_on_roi(
+    frame_rgb: np.ndarray, roi_corners: np.ndarray, landmark_infer: callable
 ) -> np.ndarray | None:
-    """Run the ROI -> crop -> landmark stage for one detection's auxiliary
-    keypoints (already in original-frame pixel space). Returns [25, 4]
-    landmarks in original-frame pixel space, or None if below
-    MIN_LANDMARK_SCORE."""
-    roi_corners = _compute_roi_corners(keypoints)
+    """Crop `roi_corners` out of `frame_rgb`, run the landmark model, and
+    map the result back to original-frame pixel space. Shared by both the
+    keypoint-derived ROI path (_landmarks_for_keypoints, BlazePose's own
+    detector) and the box-derived ROI path (_roi_corners_from_box, an
+    external detector like YOLO -- see detect_poses_from_boxes). Returns
+    [25, 4] landmarks, or None if below MIN_LANDMARK_SCORE."""
     landmark_wh = (LANDMARK_INPUT_SIZE[1], LANDMARK_INPUT_SIZE[0])
     affine = _crop_resize_matrix(roi_corners, landmark_wh)
     cropped = cv2.warpAffine(frame_rgb, affine, landmark_wh)
@@ -229,6 +230,98 @@ def _landmarks_for_keypoints(
     landmarks[:, :2] = (inverse_affine[:, :2] @ xy.T + inverse_affine[:, 2:]).T
     landmarks[:, 3] = _sigmoid(landmarks[:, 3])
     return landmarks
+
+
+def _landmarks_for_keypoints(
+    frame_rgb: np.ndarray, keypoints: np.ndarray, landmark_infer: callable
+) -> np.ndarray | None:
+    """Run the ROI -> crop -> landmark stage for one detection's auxiliary
+    keypoints (already in original-frame pixel space). Returns [25, 4]
+    landmarks in original-frame pixel space, or None if below
+    MIN_LANDMARK_SCORE."""
+    roi_corners = _compute_roi_corners(keypoints)
+    return _run_landmark_on_roi(frame_rgb, roi_corners, landmark_infer)
+
+
+# Margin applied around an external detector's (e.g. YOLO) person box when
+# building the landmark model's square crop -- the box already tightly
+# bounds head-to-feet, so this only needs to add framing slack, unlike
+# DETECT_BOX_SCALE above (which inflates a much smaller aux-keypoint
+# distance for BlazePose's own detector). 1.75, not a smaller "just a bit
+# of margin" value, because the landmark model was trained on crops from
+# BlazePose's own detector's specific keypoint-derived ROI convention, not
+# a generic tight bounding box -- empirically swept against a known-good
+# two-person reference photo (see scripts/qnn_spike.md): 1.25 scored 0.09
+# (fails MIN_LANDMARK_SCORE) for both people, 1.75 scored 0.99 / 0.71,
+# matching BlazePose's own detector's confidence on the same photo.
+BOX_ROI_SCALE = 1.75
+
+
+def _roi_corners_from_box(
+    box_xyxy: np.ndarray, scale: float = BOX_ROI_SCALE, frame_shape_hw: tuple[int, int] | None = None
+) -> np.ndarray:
+    """Build an axis-aligned (unrotated) square ROI centered on an external
+    detector's bounding box, sized to the box's longer side times `scale`.
+    Unlike _compute_roi_corners, there's no rotation cue available from a
+    plain xyxy box, so theta is always 0 -- fine for the upright,
+    camera-facing framing this project targets. Returns 4 corners
+    [top-left, bottom-left, top-right, bottom-right], shape [4, 2],
+    matching _compute_roi_corners's contract so both feed
+    _run_landmark_on_roi unchanged.
+
+    When `frame_shape_hw` is given, the ROI's center is shifted (not
+    resized) to stay within the frame bounds wherever the ROI is smaller
+    than the frame in that dimension -- otherwise a person standing near
+    an edge (very common: BOX_ROI_SCALE's margin is tuned against a
+    reference photo where people had comfortable headroom, but a person
+    filling most of a real camera's vertical FOV does not) gets a chunk of
+    the ROI sampling out-of-bounds black padding instead of margin,
+    tanking the landmark model's confidence for no visual reason -- found
+    via real captures on the physical Q6A scoring far below a demo photo
+    at the same scale, see scripts/qnn_spike.md."""
+    x1, y1, x2, y2 = box_xyxy
+    xc, yc = (x1 + x2) / 2, (y1 + y2) / 2
+    side = max(x2 - x1, y2 - y1) * scale
+    half = side / 2
+
+    if frame_shape_hw is not None:
+        frame_h, frame_w = frame_shape_hw
+        if side <= frame_w:
+            xc = np.clip(xc, half, frame_w - half)
+        if side <= frame_h:
+            yc = np.clip(yc, half, frame_h - half)
+
+    return np.array(
+        [[xc - half, yc - half], [xc - half, yc + half], [xc + half, yc - half], [xc + half, yc + half]],
+        dtype=np.float32,
+    )
+
+
+def detect_poses_from_boxes(
+    frame_bgr_uint8: np.ndarray,
+    boxes_xyxy: list[np.ndarray],
+    landmark_infer: callable,
+) -> list[np.ndarray]:
+    """Like detect_poses, but skips BlazePose's own low-resolution (128x128)
+    detector entirely and instead runs the landmark model against
+    pre-computed person boxes (already in original-frame pixel space, e.g.
+    from a higher-resolution external detector). See scripts/qnn_spike.md
+    for why BlazePose's bundled detector loses small/distant subjects at
+    ordinary room framing distance -- this is the fix.
+
+    Returns a list of [25, 4] (x, y, z, visibility) landmark arrays, one
+    per box that clears MIN_LANDMARK_SCORE, in the same order as
+    `boxes_xyxy`."""
+    frame_rgb = cv2.cvtColor(frame_bgr_uint8, cv2.COLOR_BGR2RGB)
+    frame_shape_hw = frame_bgr_uint8.shape[:2]
+
+    results = []
+    for box in boxes_xyxy:
+        roi_corners = _roi_corners_from_box(box, frame_shape_hw=frame_shape_hw)
+        landmarks = _run_landmark_on_roi(frame_rgb, roi_corners, landmark_infer)
+        if landmarks is not None:
+            results.append(landmarks)
+    return results
 
 
 def detect_poses(

@@ -135,6 +135,84 @@ def test_compute_roi_corners_square_and_centered_when_axis_aligned():
     assert np.allclose(corners, expected, atol=1e-3)
 
 
+def test_roi_corners_from_box_is_square_and_centered_on_box():
+    # Box center (50, 60), w=20, h=40 -> longer side (h=40) * scale (1.25,
+    # passed explicitly so this test doesn't silently change if
+    # BOX_ROI_SCALE's default is retuned) = 50, centered on (50, 60) ->
+    # corners at +-25 from center.
+    box = np.array([40.0, 40.0, 60.0, 80.0], dtype=np.float32)
+
+    corners = _blazepose._roi_corners_from_box(box, scale=1.25)
+
+    expected = np.array([[25.0, 35.0], [25.0, 85.0], [75.0, 35.0], [75.0, 85.0]])
+    assert corners.shape == (4, 2)
+    assert np.allclose(corners, expected, atol=1e-3)
+
+
+def test_roi_corners_from_box_shifts_to_stay_in_frame_when_it_fits():
+    # Box near the top edge of a 200x200 frame -- an unclamped ROI would
+    # extend above y=0 (out of bounds); the frame is tall enough (200) for
+    # the 100px-side ROI to fit entirely if shifted down instead of
+    # resized.
+    box = np.array([50.0, 0.0, 90.0, 40.0], dtype=np.float32)  # side = 40*2.5 = 100
+
+    corners = _blazepose._roi_corners_from_box(box, scale=2.5, frame_shape_hw=(200, 200))
+
+    assert corners[:, 1].min() >= 0.0  # no longer goes above the top edge
+    side = corners[:, 1].max() - corners[:, 1].min()
+    assert np.isclose(side, 100.0)  # shifted, not resized
+
+
+def test_roi_corners_from_box_does_not_shift_when_roi_larger_than_frame():
+    # ROI side (100) exceeds the frame's height (80) -- can't be made to
+    # fit by shifting, so the center is left alone (accept the overflow
+    # rather than silently resize/misrepresent the requested scale).
+    box = np.array([10.0, 0.0, 50.0, 40.0], dtype=np.float32)  # side = 40*2.5 = 100
+
+    corners = _blazepose._roi_corners_from_box(box, scale=2.5, frame_shape_hw=(80, 200))
+
+    yc_expected = (0.0 + 40.0) / 2
+    assert np.isclose((corners[:, 1].min() + corners[:, 1].max()) / 2, yc_expected)
+
+
+def test_roi_corners_from_box_uses_wider_dimension_for_landscape_box():
+    # Wide box: w=40 > h=20 -> side = 40 * scale, not 20 * scale.
+    box = np.array([0.0, 0.0, 40.0, 20.0], dtype=np.float32)
+
+    corners = _blazepose._roi_corners_from_box(box, scale=1.0)
+
+    side = corners[:, 0].max() - corners[:, 0].min()
+    assert np.isclose(side, 40.0)
+
+
+def test_detect_poses_from_boxes_skips_boxes_below_landmark_score():
+    frame = np.zeros((200, 200, 3), dtype=np.uint8)
+    box = np.array([50.0, 50.0, 150.0, 150.0], dtype=np.float32)
+
+    def landmark_infer(_input_nhwc):
+        return 0.1, np.zeros((_blazepose.NUM_VALID_LANDMARKS, 4), dtype=np.float32)
+
+    results = _blazepose.detect_poses_from_boxes(frame, [box], landmark_infer)
+
+    assert results == []
+
+
+def test_detect_poses_from_boxes_returns_one_result_per_passing_box():
+    frame = np.zeros((200, 200, 3), dtype=np.uint8)
+    boxes = [
+        np.array([10.0, 10.0, 60.0, 110.0], dtype=np.float32),
+        np.array([120.0, 20.0, 170.0, 120.0], dtype=np.float32),
+    ]
+
+    def landmark_infer(_input_nhwc):
+        return 0.9, np.ones((_blazepose.NUM_VALID_LANDMARKS, 4), dtype=np.float32)
+
+    results = _blazepose.detect_poses_from_boxes(frame, boxes, landmark_infer)
+
+    assert len(results) == 2
+    assert all(r.shape == (_blazepose.NUM_VALID_LANDMARKS, 4) for r in results)
+
+
 def test_crop_resize_matrix_maps_corners_to_output_bounds():
     roi_corners = np.array(
         [[0.0, 0.0], [0.0, 99.0], [99.0, 0.0], [99.0, 99.0]], dtype=np.float32
