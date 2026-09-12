@@ -5,6 +5,42 @@ don't get lost.
 
 ## Tooling
 
+- **Web dashboard: live overlay feed + gesture queue (2026-09-12, not yet
+  implemented).** A browser-viewable page showing the same overlay frame
+  `app.py` already renders (skeleton, track IDs, arm states, action
+  banner -- `overlay/renderer.py`) plus a scrolling log of triggered
+  actions with timestamps (today these only go to stdout:
+  `print(f"[gesture] #{track_id}: {action.name}")` in `app.py`). Purpose:
+  demos (show causality to someone not standing at the board's HDMI
+  output), debugging, and pipeline iteration -- this whole session's
+  workflow for every finding (exposure diagnosis, orientation bug, ROI
+  tuning, re-ID threshold) was capture-on-device -> `scp` down ->
+  view/analyze -> iterate; a live view would remove that round-trip
+  entirely for anything that doesn't need per-pixel inspection.
+  - **Likely shape, given the existing architecture:** a lightweight HTTP
+    server (Flask, or even `http.server` -- consistent with this
+    project's preference for minimal dependencies, e.g. re-ID staying on
+    plain CPU onnxruntime rather than pulling more NPU complexity in;
+    see `models/osnet_x0_25/README.md`) run on a background thread
+    alongside `app.py`'s main capture loop, since the loop is currently
+    single-threaded around `cv2.imshow`/`cv2.waitKey`. Needs thread-safe
+    shared state for "latest overlay frame" + "recent gesture events"
+    (a lock around a plain variable/deque is enough at this scale, no
+    need for anything heavier). An MJPEG stream (a well-worn, simple
+    pattern: a generator yielding JPEG-encoded frames over one HTTP
+    connection) is the lowest-effort way to get video into a browser
+    with just an `<img>` tag; the gesture queue can be simple polling or
+    Server-Sent Events off the same event deque.
+  - Should be config-gated like `overlay.show_window` already is (e.g. a
+    `web_enabled`/`web_port` pair in `OverlayConfig` or a small new
+    `WebConfig`), not always-on -- running a webcam-connected board with
+    an HTTP server bound by default isn't something to do silently.
+  - **No auth planned or implied** -- fine for a LAN-local demo/debug
+    tool the user starts deliberately, not something to expose beyond
+    that without real thought given to who else could reach it.
+  - Natural home: a new `web/` (or `dashboard/`) package alongside
+    `capture/`, `inference/`, etc., following the project's existing
+    per-concern module layout (`docs/architecture.md`).
 - **Automated bring-up/install script.** `docs/setup-q6a.md` now has a
   confirmed-working manual recipe (r2 image + BIOS update + `apt install
   fastrpc fastrpc-test fastrpc-dev libcdsprpc1 radxa-firmware-qcs6490` +
@@ -318,6 +354,99 @@ don't get lost.
   Distinguishing those needs real gesture footage to know if it's
   actually a problem in practice before adding complexity (e.g. checking
   the trajectory is roughly monotonic, not just wide-ranging).
+- **Volume gestures implemented (2026-09-12): right arm swipe up ->
+  `VOLUME_UP`, left arm swipe down in front of the body -> `VOLUME_DOWN`.**
+  Added the `ControlAction` pair (`gestures/types.py`) and a new
+  `dynamic_gestures.VerticalSwipeDetector`, parameterized by direction
+  (`"up"`/`"down"`) rather than a second near-duplicate class: checks a
+  minimum vertical range (`MIN_VERTICAL_SWIPE_RANGE = 0.8` shoulder-widths,
+  a reasoned starting point like the horizontal sweep's own thresholds,
+  not tuned against real footage) via a simple first-vs-last-sample
+  comparison (not a full trajectory/monotonicity analysis -- same
+  first-pass honesty as `SweepDetector`), while bounding horizontal drift
+  to `SIDE_X_THRESHOLD` (reused directly from `static_poses.py` rather
+  than an independently-guessed value) so "in front of the body" means
+  precisely "wouldn't also register as `OUT_TO_SIDE`." Wired into
+  `GestureStateMachine` as a second detector per relevant arm (right gets
+  `right_sweep` + `right_volume_swipe`, left gets `left_sweep` +
+  `left_volume_swipe`), firing independently of the static-pose debounce
+  path exactly like the existing SKIP sweep does. Unit-tested (both the
+  detector in isolation and end-to-end through `GestureStateMachine`) --
+  82/82 tests passing.
+  - **Re-run against the real `cheese` recording (2026-09-12): the
+    originally-flagged risk didn't happen, but a different real one did.**
+    Re-ran the exact same footage/pipeline used to validate the original
+    four actions. Full regression check passed -- all six original
+    triggers (NEXT x2, PREVIOUS, PLAY_PAUSE, SKIP x2) fired at the exact
+    same timestamps as before, unaffected by the new detectors.
+    `VOLUME_DOWN` never fired once, across every `RAISED`-arm-relaxing-
+    to-`DOWN` transition in the video (there are several) -- the
+    specific collision this was flagged for didn't materialize here.
+    But `VOLUME_UP` fired **5 times**, and inspecting the actual raw
+    `rel_y` trajectory around each one (not just the trigger/no-trigger
+    result) showed a mixed picture, not a clean pass:
+    - 2 of 5 (t=12.47s, t=15.70s) show a genuinely clean, fast,
+      monotonic rise (roughly +2.7 to -2.7 shoulder-widths in ~0.3-0.6s)
+      -- exactly the motion this detector is supposed to catch, even
+      though the person wasn't intentionally testing this gesture (this
+      recording predates the feature).
+    - 2 of 5 (t=27.17s, t=30.03s) fired while the wrist stayed in its
+      normal at-rest range the entire time (~2.4-3.4, nowhere near
+      `RAISE_Y_THRESHOLD`) -- the detector only checks *relative* range
+      and direction between the window's first and last sample, with no
+      requirement that the motion actually ends up raised or starts from
+      a settled baseline, so ordinary pose-estimation jitter/slow drift
+      within the resting range was enough to satisfy
+      `MIN_VERTICAL_SWIPE_RANGE=0.8` on its own.
+    - 1 of 5 (t=19.33s) fired while the arm was already up near a
+      confirmed `RAISED` position (having risen a moment earlier) --
+      the rolling window still partly overlapped the original rise, so
+      normal jitter while *holding* a raised pose read as "more
+      swiping." (The full picture turned out to be worse than one
+      isolated re-trigger -- see below.)
+  - **Both fixes implemented and re-validated (2026-09-12).** Fix 1:
+    `VerticalSwipeDetector._detect()` now requires the window's relevant
+    endpoint to actually cross into raised territory (`up`: last sample
+    `rel_y < -RAISE_Y_THRESHOLD`; `down`: first sample) rather than
+    accepting any sufficiently-large relative delta regardless of where
+    it starts/ends. This alone eliminated both "confined to resting
+    range" false positives. Fix 2, for the held-pose case, turned out to
+    need a materially different design than first planned: an initial
+    attempt reset each swipe detector once at the moment its target pose
+    was confirmed, but re-running against real footage showed the arm
+    was *already* confirmed `RAISED` well before the observed window even
+    started -- a one-time reset at the transition doesn't help partway
+    into an already-long hold, and the video showed VOLUME_UP
+    re-triggering roughly every 0.6s throughout the entire ~1.3s hold,
+    not just once. The actual fix: gate evaluation on the *current*
+    confirmed state, not just reset at the transition -- `right_volume_swipe`
+    is now only fed samples while the arm ISN'T already confirmed
+    `RAISED`, so a held pose simply stops accumulating any history at all
+    for as long as the hold lasts, however long that is. This gate is
+    safe for the "up" case specifically because the legitimate trigger
+    already fires *before* `RAISED` confirms (debounce lags the raw
+    crossing by a few frames), so nothing real gets cut off.
+    - **The mirror-image gate for `left_volume_swipe` (evaluate only
+      while confirmed `RAISED`) was tried and reverted -- it broke real
+      swipe-down detection.** By the time `RAISED` actually confirms, a
+      fast continuous rise-then-fall motion has often already started
+      descending below the raised threshold, so gating on "still
+      confirmed raised" cut off evaluation right as the descent itself
+      needed measuring. There's also no real evidence this gate is
+      needed for "down" in the first place: `VOLUME_DOWN` has never
+      fired once across any real-footage test run, gated or not. Left
+      as the fix-1-only (endpoint check, no gating) version, which was
+      already working correctly.
+    - **Final re-validation against the same `cheese` recording:** all
+      six original actions still fire at the identical timestamps
+      (zero regression, confirmed three times now across three rounds of
+      changes), `VOLUME_DOWN` still never fires, and `VOLUME_UP` now
+      fires exactly **once** (t=12.60s) -- the one instance already
+      confirmed as a genuinely clean, fast rise. Both spurious patterns
+      are gone with no new ones introduced. 85/85 unit tests passing.
+  - `control/` (media control backend, milestone 6) still doesn't exist,
+    so these join `NEXT`/`PREVIOUS`/`PLAY_PAUSE`/`SKIP` as actions that
+    print/display but don't yet drive real volume control.
 
 ## Hardware
 

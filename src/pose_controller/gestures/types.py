@@ -21,3 +21,5 @@ class ControlAction(Enum):
     PREVIOUS = auto()
     SKIP = auto()
     PLAY_PAUSE = auto()
+    VOLUME_UP = auto()
+    VOLUME_DOWN = auto()

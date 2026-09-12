@@ -746,3 +746,148 @@ is unmeasured. If multi-person testing ever shows incorrect merges,
 `reid_similarity_threshold` is the first place to look, and pushing it
 back toward 0.6 (or higher, now that there's a rationale trail to
 compare a new value against) would be the fix.
+
+## Volume gestures: implementation and re-run against real footage (2026-09-12)
+
+Added `VOLUME_UP`/`VOLUME_DOWN` (right arm swipe up / left arm swipe down
+in front of the body -- see `docs/backlog.md` for the original proposal
+and the collision risk flagged at the time). Implementation:
+`dynamic_gestures.VerticalSwipeDetector(direction="up"|"down")`, checking
+a minimum `rel_y` range between the rolling window's first and last
+sample (`MIN_VERTICAL_SWIPE_RANGE=0.8` shoulder-widths) while bounding
+`|rel_x|` to `SIDE_X_THRESHOLD` (reused from `static_poses.py`, not a new
+constant) so "in front of the body" means "wouldn't also classify as
+`OUT_TO_SIDE`." Wired into `GestureStateMachine` as an extra detector per
+arm alongside the existing `SweepDetector`, firing independently of the
+static-pose debounce path. 82/82 unit tests passing after the change.
+
+**Re-ran the exact same `cheese` video and pipeline used to validate the
+original four actions**, to check two things: did the new detectors
+disturb the old ones, and does the flagged collision risk (a relaxing
+`RAISED` arm reading as a false `VOLUME_DOWN`) actually happen on real
+footage.
+
+Regression: clean. All six original triggers (NEXT x2, PREVIOUS,
+PLAY_PAUSE, SKIP x2) fired at the identical timestamps as the pre-volume-
+gesture run. `VOLUME_DOWN` never fired -- the specific risk originally
+flagged (arm lowering from `RAISED`) didn't happen on this footage,
+despite several real `RAISED`->`DOWN` transitions in it.
+
+`VOLUME_UP` fired 5 times, and inspecting the actual raw `rel_y`
+trajectory around each trigger (not just whether it fired) told a more
+useful story than the trigger count alone:
+
+```
+t=12.47s: 2.80 -> 2.48 -> 2.05 -> 1.06 -> 0.49 -> 0.19 -> -0.76 -> -2.35   (clean fast rise, ~0.5s)
+t=15.70s: ~2.1-2.75 (flat ~1.3s) -> 1.53 -> 1.30 -> 0.25 -> -1.66 -> -2.71 (clean fast rise, ~0.3s, after a hold)
+t=19.33s: 2.23 -> -0.85 -> -2.94 -> [oscillates -2.3..-3.1 for ~1.3s, including the trigger samples]
+t=27.17s: oscillates 2.46-3.38 the *entire* window -- never leaves the resting range
+t=30.03s: slow drift 2.97 -> ~1.0-1.7 over ~1s -- directionally "up" but stays fully within resting range
+```
+
+2 of 5 (12.47s, 15.70s) are genuinely clean, fast, monotonic rises from
+resting to well past `RAISE_Y_THRESHOLD` -- exactly the intended motion,
+even though the person in this recording was never trying to trigger a
+volume gesture (it predates the feature). The other 3 are real gaps in
+the current design, not noise to dismiss:
+
+- **27.17s and 30.03s never leave the arm's normal resting range.** The
+  detector only checks the *relative* delta between a window's first and
+  last sample -- nothing requires the motion to actually reach raised
+  territory, or start from a settled baseline. Ordinary pose-estimation
+  jitter (real keypoint noise, not a code bug) or a slow, small drift
+  within the resting band was enough to clear
+  `MIN_VERTICAL_SWIPE_RANGE=0.8` on its own.
+- **19.33s fired while the arm was already confirmed `RAISED`**, having
+  actually risen a moment earlier (visible in the trajectory as the drop
+  to -2.94 well before the trigger). The rolling window still partially
+  overlapped that original rise, so jitter while *holding* the raised
+  pose read as additional swiping. `SweepDetector` has a `.reset()` for
+  exactly this kind of situation (clear history once a pose settles);
+  `VerticalSwipeDetector` has the same method but nothing calls it.
+
+## Fixing the two volume-gesture false-positive patterns (2026-09-12)
+
+**Fix 1: require the window's endpoint to actually reach raised
+territory.** `VerticalSwipeDetector._detect()` gained an endpoint check
+(`up`: last sample's `rel_y < -RAISE_Y_THRESHOLD`; `down`: first
+sample's) mirroring `static_poses.classify_arm`'s own `RAISED` boundary,
+instead of accepting any sufficiently large relative delta regardless of
+where it starts or ends. Re-ran against the same real footage: this
+alone eliminated both "confined to resting range" triggers (27.17s,
+30.03s) with no effect on the two genuine rises. 5 real `VOLUME_UP`
+triggers down to 3 (12.60s, 19.37s, 19.93s).
+
+**Fix 2, attempt 1 (dead end): reset on confirmation.** The plan going
+in was to reset each swipe detector's history the moment its static
+debouncer confirmed the relevant pose -- `right_volume_swipe` on
+`RAISED` confirming, `left_volume_swipe` on `DOWN` confirming (chosen
+over mirroring `RAISED` for both, since resetting `left_volume_swipe` on
+`RAISED` was worked out on paper to wipe a continuous rise-then-fall
+motion's starting point right as the debounce catches up mid-descent).
+Implemented, unit-tested, redeployed, and re-run against the same real
+footage -- **the two remaining triggers (19.37s, 19.93s) were still both
+there, unchanged.** Instrumenting the actual run (logging
+`right.confirmed` and `len(right_volume_swipe._samples)` frame by frame
+around that window) showed why: `right.confirmed` was already `RAISED`
+well *before* the observed window even started -- the arm had been held
+raised for over a second by that point. A reset that only fires once, at
+the moment of the *transition into* a state, does nothing for jitter
+that occurs deep into an already-long hold of that same state. The log
+showed the real pattern plainly: `right_volume_swipe`'s sample count
+climbing from 1 to 7 over ~0.5s, triggering (which self-clears via
+`add_sample`'s existing logic), climbing from 0 to 10 over the next
+~0.5s, triggering again -- a clean, repeating ~0.6s cycle for as long as
+the hold lasted, entirely independent of the one-time reset.
+
+**Fix 2, attempt 2 (this is what shipped): gate evaluation on the
+*current* confirmed state, not just reset at the transition.**
+`right_volume_swipe` is now only fed samples at all while
+`state.right.confirmed != ArmPose.RAISED` -- once the arm is confirmed
+raised, evaluation stops entirely, for however long the hold lasts, and
+resumes cleanly once it isn't (with `_prune`'s existing age-based cleanup
+discarding anything stale by the time evaluation restarts, no explicit
+clear needed). This is safe specifically for "up" because the legitimate
+trigger already fires *before* `RAISED` confirms (debounce lags the raw
+crossing by several frames in every real and synthetic trace looked at),
+so gating on the *debounced* state doesn't cost any real detections --
+only the post-confirmation jitter that shouldn't count anyway.
+
+**Tried the mirror-image gate for `left_volume_swipe` (evaluate only
+while confirmed `RAISED`) for symmetry -- it broke real swipe-down
+detection, and got reverted.** Traced through the existing
+`test_swipe_down_triggers_volume_down` sequence by hand: by the time
+`RAISED` actually confirms (again, lagging the raw crossing), a fast
+continuous rise-then-fall motion has frequently *already started
+descending* below the raised threshold. Gating on "still confirmed
+raised" cut off evaluation right as the descent needed to be measured,
+so the down-swipe's own endpoint requirement (must *start* raised) could
+never be satisfied by whatever samples were left. This is the same
+underlying mistake as fix-2-attempt-1's original plan (reasoning about
+raw pose *thresholds* while gating on *debounced, lagged* state, for a
+motion whose two phases straddle exactly that lag), just caught a
+different way. There was also never any real evidence this gate was
+needed for "down" -- `VOLUME_DOWN` has not fired once across any
+real-footage run in this whole investigation, gated or not -- so fixing
+a problem that was never observed, at the cost of breaking one that was
+working, wasn't a trade worth making. Left `left_volume_swipe` at
+fix-1-only (endpoint check, no gating).
+
+**Final re-validation:** all six original actions (NEXT x2, PREVIOUS,
+PLAY_PAUSE, SKIP x2) still fire at the identical timestamps as every
+prior run -- zero regression across three consecutive rounds of gesture
+changes now. `VOLUME_DOWN` still never fires. `VOLUME_UP` fires exactly
+**once**, at t=12.60s -- the one instance already confirmed (by its raw
+`rel_y` trajectory) as a genuinely clean, fast rise. Both spurious
+patterns are gone, no new ones introduced. 85/85 unit tests passing.
+See `docs/backlog.md` for current status.
+
+The throughline worth remembering from this whole detour: two separate,
+independently-reasoned fixes (the original reset design, and the
+symmetric "down" gate) both failed for the *same underlying reason* --
+treating the debounced/confirmed state as if it tracked the raw pose in
+real time, when it's deliberately several frames behind by design
+(that's what `DEBOUNCE_FRAMES` is for). Every fix in this area needs to
+be checked against "what does the raw classification look like during
+the few frames where confirmed hasn't caught up yet," not just "what
+does confirmed eventually settle to."

@@ -72,16 +72,20 @@ the Q6A:
   -- see `normalize.py`'s module docstring for the reasoning and the
   escape hatch if real-camera testing ever shows this assumption wrong.
   `dynamic_gestures.SweepDetector` tracks one wrist's rolling-window
-  trajectory to detect a one-armed overhead sweep. `state_machine.
-  GestureStateMachine` ties it together per track_id: debounces static
-  poses (`DEBOUNCE_FRAMES` consecutive frames, tolerating momentary
-  occlusion) and edge-triggers `ControlAction`s (right-out -> NEXT,
-  left-out -> PREVIOUS, both-raised -> PLAY_PAUSE, sweep -> SKIP).
+  trajectory to detect a one-armed overhead sweep;
+  `dynamic_gestures.VerticalSwipeDetector` does the same for a directional
+  vertical swipe in front of the body (up or down), used for volume.
+  `state_machine.GestureStateMachine` ties it together per track_id:
+  debounces static poses (`DEBOUNCE_FRAMES` consecutive frames, tolerating
+  momentary occlusion) and edge-triggers `ControlAction`s (right-out ->
+  NEXT, left-out -> PREVIOUS, both-raised -> PLAY_PAUSE, overhead sweep ->
+  SKIP, right swipe up -> VOLUME_UP, left swipe down -> VOLUME_DOWN).
   Validated against real detected keypoints (not just synthetic test
   data) and extensively unit-tested; **also validated end-to-end against
   real recorded footage** running the full `estimate -> track -> gesture`
-  loop over every frame -- all four actions (NEXT, PREVIOUS, PLAY_PAUSE,
-  SKIP) triggered correctly from a real person's arm movements, though
+  loop over every frame -- all four originally-required actions (NEXT,
+  PREVIOUS, PLAY_PAUSE, SKIP) triggered correctly from a real person's
+  arm movements, though
   reliability is still limited by detection-hit-rate/tracking-continuity
   on harder footage, not the gesture logic itself -- see
   `docs/backlog.md`.

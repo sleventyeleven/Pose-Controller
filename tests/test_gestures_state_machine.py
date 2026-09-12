@@ -1,5 +1,5 @@
 from pose_controller.gestures.state_machine import DEBOUNCE_FRAMES, GestureStateMachine
-from pose_controller.gestures.types import ControlAction
+from pose_controller.gestures.types import ArmPose, ControlAction
 from pose_controller.inference.pose import Keypoint, Landmark, PoseResult
 
 
@@ -156,6 +156,72 @@ def test_sweep_triggers_skip():
         fired.extend(gsm.update_all([pose]))
 
     assert any(a == ControlAction.SKIP for _, a in fired)
+
+
+def test_swipe_up_triggers_volume_up():
+    clock = _FakeClock()
+    gsm = GestureStateMachine(time_fn=clock)
+
+    fired = []
+    for i in range(11):
+        clock.advance(0.1)
+        # Right wrist rising from below the shoulder to above it, centered
+        # (shoulder x=0.5) -- an "up" swipe in front of the body.
+        wrist_y = 0.6 - i * 0.04  # 0.6 .. 0.2, i.e. rel_y = (wrist_y-0.4)/0.2 falls 1.0 -> -1.0
+        pose = _pose(1, {Landmark.RIGHT_WRIST: Keypoint(0.5, wrist_y, 0.9)})
+        fired.extend(gsm.update_all([pose]))
+
+    assert any(a == ControlAction.VOLUME_UP for _, a in fired)
+
+
+def test_swipe_down_triggers_volume_down():
+    clock = _FakeClock()
+    gsm = GestureStateMachine(time_fn=clock)
+
+    fired = []
+    for i in range(11):
+        clock.advance(0.1)
+        # Left wrist falling from above the shoulder to below it, centered
+        # (shoulder x=0.3) -- a "down" swipe in front of the body.
+        wrist_y = 0.2 + i * 0.04  # 0.2 .. 0.6, i.e. rel_y rises -1.0 -> 1.0
+        pose = _pose(1, {Landmark.LEFT_WRIST: Keypoint(0.3, wrist_y, 0.9)})
+        fired.extend(gsm.update_all([pose]))
+
+    assert any(a == ControlAction.VOLUME_DOWN for _, a in fired)
+
+
+def test_volume_up_does_not_retrigger_while_raised_is_held():
+    # Real-footage regression guard (scripts/qnn_spike.md): a raised arm
+    # held for over a second, with ordinary jitter, kept re-firing
+    # VOLUME_UP roughly every 0.6s -- jitter alone was enough to redevelop
+    # a fresh 0.8-shoulder-width range each time. Once RAISED confirms,
+    # evaluation should stop entirely until the arm comes back down.
+    clock = _FakeClock()
+    gsm = GestureStateMachine(time_fn=clock)
+
+    fired = []
+    # Rise from resting to well past raised -- triggers VOLUME_UP once
+    # and confirms RAISED along the way.
+    for i in range(8):
+        clock.advance(0.1)
+        rel_y = 1.0 - i * 0.4  # 1.0 .. -1.8
+        wrist_y = 0.4 + rel_y * 0.2  # shoulder y=0.4, scale=0.2
+        pose = _pose(1, {Landmark.RIGHT_WRIST: Keypoint(0.5, wrist_y, 0.9)})
+        fired.extend(gsm.update_all([pose]))
+
+    assert gsm._tracks[1].right.confirmed == ArmPose.RAISED
+    assert sum(1 for _, a in fired if a == ControlAction.VOLUME_UP) == 1
+
+    # Hold raised with jitter comfortably exceeding MIN_VERTICAL_SWIPE_RANGE
+    # if it were still being evaluated -- must not fire again.
+    for i in range(20):
+        clock.advance(0.1)
+        rel_y = -1.5 if i % 2 == 0 else -2.5  # jitter range 1.0, > 0.8
+        wrist_y = 0.4 + rel_y * 0.2
+        pose = _pose(1, {Landmark.RIGHT_WRIST: Keypoint(0.5, wrist_y, 0.9)})
+        fired.extend(gsm.update_all([pose]))
+
+    assert sum(1 for _, a in fired if a == ControlAction.VOLUME_UP) == 1
 
 
 def test_stale_track_state_is_pruned_and_requires_fresh_debounce():

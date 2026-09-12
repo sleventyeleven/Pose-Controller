@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from pose_controller.gestures.dynamic_gestures import SweepDetector
+from pose_controller.gestures.dynamic_gestures import SweepDetector, VerticalSwipeDetector
 from pose_controller.gestures.normalize import normalize_pose
 from pose_controller.gestures.static_poses import classify_arm
 from pose_controller.gestures.types import ArmPose, ControlAction
@@ -56,11 +56,26 @@ class _TrackGestureState:
     right: _ArmDebouncer = field(default_factory=_ArmDebouncer)
     left_sweep: SweepDetector = field(default_factory=SweepDetector)
     right_sweep: SweepDetector = field(default_factory=SweepDetector)
+    # Only the two directions the project actually maps to an action --
+    # right arm up for volume-up, left arm down for volume-down (see
+    # docs/backlog.md; not implemented symmetrically for the other two
+    # arm/direction combinations since nothing requested them).
+    right_volume_swipe: VerticalSwipeDetector = field(
+        default_factory=lambda: VerticalSwipeDetector(direction="up")
+    )
+    left_volume_swipe: VerticalSwipeDetector = field(
+        default_factory=lambda: VerticalSwipeDetector(direction="down")
+    )
     last_seen_frame: int = 0
 
     @classmethod
     def with_clock(cls, time_fn) -> "_TrackGestureState":
-        return cls(left_sweep=SweepDetector(time_fn=time_fn), right_sweep=SweepDetector(time_fn=time_fn))
+        return cls(
+            left_sweep=SweepDetector(time_fn=time_fn),
+            right_sweep=SweepDetector(time_fn=time_fn),
+            right_volume_swipe=VerticalSwipeDetector(direction="up", time_fn=time_fn),
+            left_volume_swipe=VerticalSwipeDetector(direction="down", time_fn=time_fn),
+        )
 
 
 class GestureStateMachine:
@@ -73,6 +88,8 @@ class GestureStateMachine:
       - left arm confirmed OUT_TO_SIDE -> PREVIOUS
       - both arms confirmed RAISED (simultaneously) -> PLAY_PAUSE
       - one-armed overhead sweep (either arm) -> SKIP
+      - right arm swipe up in front of the body -> VOLUME_UP
+      - left arm swipe down in front of the body -> VOLUME_DOWN
 
     All triggers are edge-triggered (fire once on the transition into the
     triggering state), not level-triggered -- holding a pose doesn't
@@ -116,14 +133,45 @@ class GestureStateMachine:
 
         actions: list[ControlAction] = []
 
+        # right_volume_swipe is only evaluated while the arm ISN'T already
+        # confirmed RAISED. This is what actually stops repeat-firing from
+        # jitter during a long hold: real footage showed a raised arm held
+        # for over a second re-triggering VOLUME_UP roughly every 0.6s
+        # purely from jitter, because each trigger's own self-clear (see
+        # add_sample) let a fresh 0.8-shoulder-width range redevelop from
+        # noise alone well within the hold. Gating is safe here because
+        # the legitimate up-swipe's own trigger fires *before* RAISED
+        # confirms (debounce lags the raw crossing by a few frames), so
+        # cutting off evaluation once confirmed doesn't cost real
+        # detections -- only the post-confirmation jitter that shouldn't
+        # count anyway. Once the arm leaves RAISED, `_prune`'s own
+        # age-based cleanup discards anything more than WINDOW_SECONDS old
+        # by the time evaluation resumes -- no separate reset needed.
+        #
+        # left_volume_swipe deliberately does NOT get the mirror-image
+        # gate (evaluate only while confirmed RAISED): tried it, and it
+        # broke real swipe-down detection -- by the time RAISED actually
+        # confirms (again, lagging a few frames), the arm has often
+        # already started descending below the raised threshold, so
+        # gating on "still confirmed raised" cuts off evaluation right as
+        # the descent itself needs to be measured. There's also no real
+        # evidence this gate is needed for "down": VOLUME_DOWN never fired
+        # once across every real-footage test run, gated or not. Fixing
+        # a problem that was never observed, at the cost of breaking one
+        # that was working, isn't a trade worth making -- see
+        # scripts/qnn_spike.md for the full trace of both findings.
         if normalized.right.wrist_relative is not None:
             rel_x, rel_y = normalized.right.wrist_relative
             if state.right_sweep.add_sample(rel_x, rel_y):
                 actions.append(ControlAction.SKIP)
+            if state.right.confirmed != ArmPose.RAISED and state.right_volume_swipe.add_sample(rel_x, rel_y):
+                actions.append(ControlAction.VOLUME_UP)
         if normalized.left.wrist_relative is not None:
             rel_x, rel_y = normalized.left.wrist_relative
             if state.left_sweep.add_sample(rel_x, rel_y):
                 actions.append(ControlAction.SKIP)
+            if state.left_volume_swipe.add_sample(rel_x, rel_y):
+                actions.append(ControlAction.VOLUME_DOWN)
 
         right_changed = state.right.update(classify_arm(normalized.right))
         left_changed = state.left.update(classify_arm(normalized.left))
