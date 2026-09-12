@@ -103,11 +103,22 @@ the Q6A:
   requirement: a viewer sees an arm state building up *before* the
   action it triggers, not just the action appearing with no visible
   cause.
+- **web/** (initial draft) -- `DashboardState` + `DashboardServer`: a
+  browser-viewable page showing the live overlay frame (MJPEG stream)
+  and a scrolling gesture-trigger queue, on a background thread alongside
+  the main capture loop. Standard-library `http.server` only, no new
+  dependency. Off by default (`OverlayConfig.web_enabled`) -- for demos,
+  debugging, and pipeline iteration without a display attached or a
+  manual capture/scp/inspect round-trip; see `docs/backlog.md` for scope
+  and what's not yet handled (slow-viewer backpressure, multi-person
+  scoping, on-device validation).
 - **app.py + config.py** -- orchestrates the pipeline loop (capture ->
   `PoseEstimator.estimate` -> `Tracker.update` -> `GestureStateMachine.
-  update_all` -> `draw_poses` + `draw_action_banner`). `AppConfig` loads
-  from YAML (`configs/dev_laptop.yaml` vs `configs/dragon_q6a.yaml`), so
-  switching hardware is a config change, not a code change.
+  update_all` -> `draw_poses` + `draw_action_banner` +
+  `DashboardState.update_frame`/`add_event` when the dashboard is
+  enabled). `AppConfig` loads from YAML (`configs/dev_laptop.yaml` vs
+  `configs/dragon_q6a.yaml`), so switching hardware is a config change,
+  not a code change.
 
 Current status: milestones 1-4 are in place (scaffolding, capture + pose
 baseline, multi-person detection + tracking with re-ID, gesture

@@ -29,6 +29,13 @@ class InferenceConfig:
 class OverlayConfig:
     show_window: bool = True
     window_name: str = "Pose-Controller"
+    # Local browser dashboard (web/dashboard.py): live overlay feed +
+    # gesture queue, for demos/debugging/pipeline iteration without a
+    # display attached or a manual capture/scp/inspect cycle -- see
+    # docs/backlog.md. Off by default: this binds an HTTP server, which
+    # shouldn't happen silently just because the app started.
+    web_enabled: bool = False
+    web_port: int = 8080
 
 
 @dataclass

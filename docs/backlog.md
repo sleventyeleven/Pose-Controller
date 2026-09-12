@@ -5,42 +5,48 @@ don't get lost.
 
 ## Tooling
 
-- **Web dashboard: live overlay feed + gesture queue (2026-09-12, not yet
-  implemented).** A browser-viewable page showing the same overlay frame
-  `app.py` already renders (skeleton, track IDs, arm states, action
-  banner -- `overlay/renderer.py`) plus a scrolling log of triggered
-  actions with timestamps (today these only go to stdout:
-  `print(f"[gesture] #{track_id}: {action.name}")` in `app.py`). Purpose:
-  demos (show causality to someone not standing at the board's HDMI
-  output), debugging, and pipeline iteration -- this whole session's
-  workflow for every finding (exposure diagnosis, orientation bug, ROI
-  tuning, re-ID threshold) was capture-on-device -> `scp` down ->
-  view/analyze -> iterate; a live view would remove that round-trip
-  entirely for anything that doesn't need per-pixel inspection.
-  - **Likely shape, given the existing architecture:** a lightweight HTTP
-    server (Flask, or even `http.server` -- consistent with this
-    project's preference for minimal dependencies, e.g. re-ID staying on
-    plain CPU onnxruntime rather than pulling more NPU complexity in;
-    see `models/osnet_x0_25/README.md`) run on a background thread
-    alongside `app.py`'s main capture loop, since the loop is currently
-    single-threaded around `cv2.imshow`/`cv2.waitKey`. Needs thread-safe
-    shared state for "latest overlay frame" + "recent gesture events"
-    (a lock around a plain variable/deque is enough at this scale, no
-    need for anything heavier). An MJPEG stream (a well-worn, simple
-    pattern: a generator yielding JPEG-encoded frames over one HTTP
-    connection) is the lowest-effort way to get video into a browser
-    with just an `<img>` tag; the gesture queue can be simple polling or
-    Server-Sent Events off the same event deque.
-  - Should be config-gated like `overlay.show_window` already is (e.g. a
-    `web_enabled`/`web_port` pair in `OverlayConfig` or a small new
-    `WebConfig`), not always-on -- running a webcam-connected board with
-    an HTTP server bound by default isn't something to do silently.
-  - **No auth planned or implied** -- fine for a LAN-local demo/debug
-    tool the user starts deliberately, not something to expose beyond
-    that without real thought given to who else could reach it.
-  - Natural home: a new `web/` (or `dashboard/`) package alongside
-    `capture/`, `inference/`, etc., following the project's existing
-    per-concern module layout (`docs/architecture.md`).
+- **Web dashboard: live overlay feed + gesture queue -- initial draft
+  implemented (2026-09-12).** `web/dashboard.py`: a browser page showing
+  the live overlay frame (MJPEG stream) plus a scrolling gesture queue
+  (polled JSON), built on the standard library's `http.server`
+  (`ThreadingHTTPServer`) -- no Flask or other dependency added, matching
+  this project's existing minimal-dependency preference (see
+  `models/osnet_x0_25/README.md`). `DashboardState` is the thread-safe
+  handoff point: `app.py`'s capture loop calls `update_frame()` (JPEG-
+  encodes and stores the latest overlay frame) and `add_event()` (per
+  triggered gesture) once per iteration; the HTTP server's request
+  handlers (one thread per open connection) read from the same state.
+  Config-gated via `OverlayConfig.web_enabled` (default `False`) /
+  `web_port` (default 8080), exactly as planned -- doesn't bind a socket
+  unless explicitly turned on. No authentication, as scoped -- a
+  deliberately-started LAN-local tool.
+  - Purpose unchanged from the original ask: demos (causality visible to
+    someone not standing at the board's HDMI output), debugging, and
+    pipeline iteration -- this whole session's workflow for every finding
+    (exposure diagnosis, orientation bug, ROI tuning, re-ID threshold)
+    was capture-on-device -> `scp` down -> view/analyze -> iterate; this
+    removes that round-trip for anything that doesn't need per-pixel
+    inspection.
+  - Validated two ways: 6 unit tests (`tests/test_web_dashboard.py`)
+    exercising the actual HTTP server over a real loopback socket (not
+    mocked) -- index page, events JSON, MJPEG stream headers/boundary,
+    event-history bounding, 404 handling -- and a manual visual check
+    (synthetic frames + fake gesture events fed into a running server,
+    viewed in an actual browser): confirmed the video pane updates live
+    and the gesture queue populates and scrolls correctly.
+  - **Not yet done:** run on the physical Q6A itself (only validated in
+    this dev environment so far -- should just work, since it's pure
+    Python stdlib + cv2 JPEG encoding, both already present on-device,
+    but "should work" isn't "confirmed working" by this project's own
+    standard). No reconnection/backpressure handling if a viewer's
+    connection is slow (the stream handler just blocks on `wfile.write`,
+    which could stall the one thread serving that connection --
+    `ThreadingHTTPServer` gives each connection its own thread so this
+    wouldn't block the capture loop or other viewers, but a genuinely
+    stalled slow client would leak that one thread until it times out or
+    disconnects). Single global dashboard state, not scoped per-track --
+    fine for the single-person demos this was built for, would need
+    rethinking for serious multi-person use.
 - **Automated bring-up/install script.** `docs/setup-q6a.md` now has a
   confirmed-working manual recipe (r2 image + BIOS update + `apt install
   fastrpc fastrpc-test fastrpc-dev libcdsprpc1 radxa-firmware-qcs6490` +

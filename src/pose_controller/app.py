@@ -6,11 +6,12 @@ import sys
 import cv2
 
 from pose_controller.capture import Camera, assess_exposure
-from pose_controller.config import AppConfig, TrackingConfig
+from pose_controller.config import AppConfig, OverlayConfig, TrackingConfig
 from pose_controller.gestures import GestureStateMachine
 from pose_controller.inference.backends import build_pose_estimator
 from pose_controller.overlay import draw_action_banner, draw_poses
 from pose_controller.tracking import ReidEmbedder, Tracker
+from pose_controller.web import DashboardServer, DashboardState
 
 # How long a triggered action stays shown in the overlay banner, in
 # frames -- not real time, since fps varies by backend/hardware. ~1.5s at
@@ -36,11 +37,22 @@ def build_tracker(config: TrackingConfig) -> Tracker:
     )
 
 
+def build_dashboard(config: OverlayConfig) -> tuple[DashboardState, DashboardServer] | tuple[None, None]:
+    if not config.web_enabled:
+        return None, None
+    state = DashboardState()
+    server = DashboardServer(state, port=config.web_port)
+    server.start()
+    print(f"[web] dashboard running at http://localhost:{server.port}/")
+    return state, server
+
+
 def run(config: AppConfig) -> None:
     camera = Camera(config.capture)
     pose_estimator = build_pose_estimator(config.inference)
     tracker = build_tracker(config.tracking)
     gestures = GestureStateMachine()
+    dashboard_state, dashboard_server = build_dashboard(config.overlay)
 
     banner_text: str | None = None
     banner_frames_remaining = 0
@@ -68,6 +80,8 @@ def run(config: AppConfig) -> None:
                 print(f"[gesture] #{track_id}: {action.name}")
                 banner_text = f"#{track_id}: {action.name}"
                 banner_frames_remaining = ACTION_BANNER_FRAMES
+                if dashboard_state is not None:
+                    dashboard_state.add_event(track_id, action.name)
 
             arm_states = {}
             for pose in tracked_poses:
@@ -92,6 +106,9 @@ def run(config: AppConfig) -> None:
                 if banner_frames_remaining == 0:
                     banner_text = None
 
+            if dashboard_state is not None:
+                dashboard_state.update_frame(frame)
+
             if config.overlay.show_window:
                 cv2.imshow(config.overlay.window_name, frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -100,6 +117,8 @@ def run(config: AppConfig) -> None:
         camera.release()
         pose_estimator.close()
         cv2.destroyAllWindows()
+        if dashboard_server is not None:
+            dashboard_server.stop()
 
 
 def main(argv: list[str] | None = None) -> int:
