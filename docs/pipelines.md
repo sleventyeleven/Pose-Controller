@@ -119,3 +119,39 @@ The `yolo26` fps gap versus `qnn` isn't yet root-caused -- see
 (compute cost of a full 640x640 forward pass vs. a small crop, `w8a16`
 vs. `w8a8` overhead, Python-side decode cost) and what would need
 measuring to tell them apart.
+
+## Live system resource usage (`yolo26`, real webcam + dashboard, both boards)
+
+The results earlier in this doc were a scripted, offline comparison
+against a fixed recording. These are the first measurements of the
+*whole running app* under real, live use -- webcam capture, re-ID, the
+web dashboard, and media control all running together, sampled every 5s
+throughout each interactive test session (`docs/backlog.md` has the full
+writeup of both):
+
+| Metric | Q6A (~45 min session) | Q8B (~30 min session) |
+|---|---|---|
+| FPS | ~9.6 avg (range 6.6-10.3) | ~9.9 avg (range 7.9-9.9) |
+| CPU | ~552% avg, 640% max (of 800% total, 8 cores) | ~245% avg, 259% max (of 800% total, 8 cores) |
+| RSS memory | ~251MB avg, 253MB max (stable) | ~279MB avg, 287MB max (stable) |
+| System RAM available | 7.4GB total | -- |
+
+Both live FPS numbers are lower than the ~12.6fps scripted comparison
+above -- expected, since these runs additionally pay for real webcam
+capture, re-ID appearance matching, dashboard JPEG encoding, and
+media-status polling that the scripted test never included. The FPS gap
+between boards is small (9.6 vs 9.9), but **the CPU gap is not** --
+the Q8B sustained essentially the same throughput at less than half the
+Q6A's CPU usage. Per-model NPU latency was already measured faster on
+the Q8B for `yolo26` (~9.9ms vs ~14.9ms, earlier table) but that alone
+doesn't explain matched FPS *and* lower CPU -- if the NPU call finishes
+faster but the achieved frame rate barely moves, something else in the
+loop (camera read cadence, Python-side decode, JPEG encoding) is likely
+the actual bottleneck holding both boards near ~10fps, and the Q8B's
+faster NPU is showing up as idle headroom instead of extra frames. Not
+confirmed -- worth profiling the loop's own stages in isolation before
+concluding. **NPU utilization itself is not visible through any tool
+used so far** on either board -- only per-model inference *latency* (the
+tables above), not a load percentage, so how much NPU headroom remains
+at this frame rate is still unknown. `qnn` and `hrnet` have no
+equivalent live measurement yet on either board.

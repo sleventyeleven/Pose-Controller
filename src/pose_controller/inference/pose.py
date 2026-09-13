@@ -8,9 +8,25 @@ import numpy as np
 
 
 class Landmark(IntEnum):
-    """Upper-body-relevant subset, indices match MediaPipe Pose's 33-point schema."""
+    """Indices match MediaPipe Pose's 33-point schema. Covers COCO's full
+    17-keypoint set (nose, eyes, ears, shoulders, elbows, wrists, hips,
+    knees, ankles) for the overlay's full-body skeleton -- see
+    `overlay/renderer.py`'s `_SKELETON_EDGES`.
+
+    Gesture recognition (`gestures/`) only ever reads the upper-body
+    subset (shoulders/elbows/wrists/hips); the leg entries exist purely
+    for display. Not every backend can actually fill every entry: the
+    `qnn` backend's compiled BlazePose landmark model only outputs 25 of
+    MediaPipe's 33 landmarks (`_blazepose.NUM_VALID_LANDMARKS`), which
+    covers eyes/ears but stops short of knees/ankles -- see
+    `docs/pipelines.md`. `yolo26`/`hrnet` cover all of these (COCO's own
+    17-point schema, decoded in full by both)."""
 
     NOSE = 0
+    LEFT_EYE = 2
+    RIGHT_EYE = 5
+    LEFT_EAR = 7
+    RIGHT_EAR = 8
     LEFT_SHOULDER = 11
     RIGHT_SHOULDER = 12
     LEFT_ELBOW = 13
@@ -19,6 +35,10 @@ class Landmark(IntEnum):
     RIGHT_WRIST = 16
     LEFT_HIP = 23
     RIGHT_HIP = 24
+    LEFT_KNEE = 25
+    RIGHT_KNEE = 26
+    LEFT_ANKLE = 27
+    RIGHT_ANKLE = 28
 
 
 @dataclass

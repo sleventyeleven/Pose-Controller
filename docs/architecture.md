@@ -145,12 +145,22 @@ the Q6A:
   regardless of whether control is enabled -- that causality display was
   never conditional on this. See `docs/backlog.md` for what's still
   unvalidated.
-- **overlay/** -- `draw_poses` renders skeleton + track-ID + each
+- **overlay/** -- `draw_poses` renders a bounding box, full-body skeleton
+  (COCO's own skeleton -- face, arms, torso, legs), track-ID, and each
   person's current confirmed arm states (e.g. "L:- R:OUT"), color-keyed
-  by `track_id`; `draw_action_banner` shows the most recently triggered
-  action for a few seconds. Together these are the causality
-  requirement: a viewer sees an arm state building up *before* the
-  action it triggers, not just the action appearing with no visible
+  by `track_id`. The box costs nothing extra to draw (it's `pose.bbox`,
+  already computed for tracking); how much of the skeleton actually
+  renders depends on which `Landmark`s the active backend fills in --
+  `yolo26`/`hrnet` cover COCO's full 17 points for free (same single
+  inference call, this project's own decode just wasn't using all of it
+  before), while the `qnn` backend's compiled BlazePose model has no leg
+  landmarks at all (`inference/pose.py`'s `Landmark` docstring). Real
+  keypoint-mapping and drawing added 2026-09-12 after the first live
+  dashboard test -- see `docs/backlog.md`. `draw_action_banner` shows the
+  most recently triggered action for a few seconds. Together these are
+  the causality requirement: a viewer sees an arm state building up
+  *before* the action it triggers, not just the action appearing with no
+  visible
   cause.
 - **web/** (initial draft) -- `DashboardState` + `DashboardServer`: a
   browser-viewable page showing the live overlay frame (MJPEG stream),

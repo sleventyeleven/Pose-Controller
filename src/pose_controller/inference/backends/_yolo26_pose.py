@@ -59,17 +59,23 @@ DETECTOR_INPUT_SIZE = (640, 640)  # H, W
 NMS_SCORE_THRESHOLD = 0.45
 NMS_IOU_THRESHOLD = 0.7  # matches qai_hub_models' YoloPoseEvaluator default
 
-# COCO's 17-keypoint order (confirmed from
+# COCO's full 17-keypoint order (confirmed from
 # qai_hub_models.datasets.coco.coco_keypoints.COCO_SKELETON's ordering,
-# not assumed) mapped onto this project's Landmark enum -- only the
-# subset gestures/ actually uses. Landmark's own integer values are
-# MediaPipe indices; PoseResult.keypoints is keyed by whatever int a
-# backend chooses, as long as it's consistent, so reusing Landmark's
-# values here (rather than COCO's own indices) is what makes this
-# backend a drop-in for every downstream consumer (Tracker,
-# GestureStateMachine, overlay) with zero changes to any of them.
+# not assumed) mapped onto this project's Landmark enum -- all 17, not
+# just the upper-body subset gestures/ reads, so the overlay can draw a
+# full-body skeleton (see overlay/renderer.py's _SKELETON_EDGES).
+# Landmark's own integer values are MediaPipe indices; PoseResult.
+# keypoints is keyed by whatever int a backend chooses, as long as it's
+# consistent, so reusing Landmark's values here (rather than COCO's own
+# indices) is what makes this backend a drop-in for every downstream
+# consumer (Tracker, GestureStateMachine, overlay) with zero changes to
+# any of them.
 _COCO_TO_LANDMARK: dict[int, Landmark] = {
     0: Landmark.NOSE,
+    1: Landmark.LEFT_EYE,
+    2: Landmark.RIGHT_EYE,
+    3: Landmark.LEFT_EAR,
+    4: Landmark.RIGHT_EAR,
     5: Landmark.LEFT_SHOULDER,
     6: Landmark.RIGHT_SHOULDER,
     7: Landmark.LEFT_ELBOW,
@@ -78,6 +84,10 @@ _COCO_TO_LANDMARK: dict[int, Landmark] = {
     10: Landmark.RIGHT_WRIST,
     11: Landmark.LEFT_HIP,
     12: Landmark.RIGHT_HIP,
+    13: Landmark.LEFT_KNEE,
+    14: Landmark.RIGHT_KNEE,
+    15: Landmark.LEFT_ANKLE,
+    16: Landmark.RIGHT_ANKLE,
 }
 
 

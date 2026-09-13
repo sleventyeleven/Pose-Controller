@@ -74,6 +74,29 @@ def test_detect_poses_maps_coco_keypoints_onto_landmark_enum():
     assert np.isclose(right_wrist.visibility, 0.7)
 
 
+def test_detect_poses_maps_the_full_17_coco_keypoints_not_just_upper_body():
+    frame = np.zeros((640, 640, 3), dtype=np.uint8)
+    boxes = np.array([[100.0, 100.0, 300.0, 500.0]], dtype=np.float32)
+    scores = np.array([0.9], dtype=np.float32)
+    keypoints = np.zeros((1, NUM_KEYPOINTS, 3), dtype=np.float32)
+    keypoints[0, 1] = [10.0, 10.0, 0.9]  # left_eye
+    keypoints[0, 4] = [20.0, 10.0, 0.9]  # right_ear
+    keypoints[0, 13] = [30.0, 300.0, 0.9]  # left_knee
+    keypoints[0, 16] = [40.0, 400.0, 0.9]  # right_ankle
+
+    def detector_infer(_input_nhwc):
+        return boxes, scores, keypoints
+
+    pose = _yolo26_pose.detect_poses(frame, detector_infer)[0]
+
+    assert pose.get(Landmark.LEFT_EYE) is not None
+    assert pose.get(Landmark.RIGHT_EAR) is not None
+    assert pose.get(Landmark.LEFT_KNEE) is not None
+    assert np.isclose(pose.get(Landmark.LEFT_KNEE).y, 300.0 / 640)
+    assert pose.get(Landmark.RIGHT_ANKLE) is not None
+    assert np.isclose(pose.get(Landmark.RIGHT_ANKLE).y, 400.0 / 640)
+
+
 def test_detect_poses_applies_nms_across_overlapping_boxes():
     frame = np.zeros((640, 640, 3), dtype=np.uint8)
     boxes = np.array(

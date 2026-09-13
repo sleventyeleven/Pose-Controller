@@ -108,6 +108,63 @@ don't get lost.
   - Whatever the cause, ~12.6fps is still usable for gesture-triggered
     control (not a video-smoothness-critical application), so this is
     an understand-it item, not necessarily a fix-it-before-using item.
+- **First live (not scripted) dashboard test of `yolo26`, 2026-09-12 --
+  real CPU/RAM/FPS numbers, one person, ~45 minutes.** Ran the actual
+  `pose_controller.app` entry point (not a scratch script) via
+  `AppConfig.from_yaml` with `inference.backend: yolo26`, re-ID, and
+  `control.enabled: true` (`playerctl`, no real player running --
+  correctly showed "No player found" on the dashboard panel) all on at
+  once, dashboard streamed over an SSH port-forward for live interactive
+  testing and feedback. User feedback: "way better" than the existing
+  pipeline, consistent with the earlier scripted real-footage validation
+  above; some missed detections with the person only partially in frame
+  or at odd angles, "expected."
+  - **Real resource numbers** (5s-interval sampling throughout the
+    session, `ps`): ~9.6fps average (range 6.6-10.3, lower than the
+    ~12.6fps scripted test -- this run additionally includes real webcam
+    capture, re-ID appearance matching, dashboard JPEG encoding, and
+    media-status polling overhead that the earlier synthetic-input
+    script test didn't have), ~552% average CPU (max 640%) on this
+    board's 8 cores (~69-80% of total capacity), ~251MB average RSS
+    (max 253MB, stable -- no apparent leak over 45 minutes) out of
+    7.4GB total system RAM. NPU utilization itself isn't visible through
+    any tool used so far -- only per-model inference *latency*, not a
+    load percentage, so "how much NPU headroom is left" remains unknown.
+  - **Found and fixed a real, unrelated bug while setting this test up**:
+    `Camera.__init__`'s plain `cv2.VideoCapture(source)` intermittently
+    fails to open the Nexigo webcam on this board (OpenCV auto-selects
+    GStreamer, whose pipeline sometimes fails to start) -- see the
+    Hardware section below for the fix. This had never been caught
+    before because every prior on-device test went through hand-written
+    scratch scripts that happened to already hardcode the working
+    `cv2.CAP_V4L2` backend explicitly; this was the first time the real
+    `Camera` class was exercised live on this board.
+  - **Follow-up requested**: extend the overlay to a full bounding box +
+    full-body skeleton (matching typical YOLO26 demo visualizations) --
+    the model output already supports this for free, see
+    `docs/architecture.md`'s `overlay/` description. Implemented the
+    same day, unit-tested, visually verified via a synthetic pose render
+    (not yet re-verified live against real footage after the change).
+- **Same live dashboard test repeated on the Q8B, 2026-09-13, after
+  physically moving the Nexigo webcam over.** Real webcam this time was
+  `/dev/video2`, not `/dev/video0` like the Q6A -- the Q8B's SoC video
+  codec (`docs/setup-q8b.md`'s "Iris Decoder"/"Iris Encoder" finding)
+  already occupies indices 0/1, confirmed by testing both new device
+  nodes directly rather than assuming. The `Camera` fix from the Q6A test
+  above applied cleanly with **no workaround needed this time** -- real
+  validation that the fix generalizes, not just a same-board fluke. User
+  feedback: works fine, "probably a higher frame rate than the Q6A."
+  - **Real resource numbers, same methodology as the Q6A run**: ~9.9fps
+    average (range 7.9-9.9) -- confirms the user's read, though the gap
+    is small. The bigger difference is CPU: ~245% average (max 259%) on
+    this board's 8 cores, versus the Q6A's ~552% average for
+    *essentially the same throughput*. Memory: ~279MB average RSS (max
+    287MB, stable). See `docs/pipelines.md`'s "Live system resource
+    usage" table for both boards side by side, including a hypothesis
+    for why matched FPS plus much lower CPU might mean the loop's actual
+    bottleneck isn't the NPU call at all on either board -- not
+    confirmed, worth profiling the loop's individual stages before
+    concluding anything further.
 
 ## Tracking / multi-person (milestone 3 follow-ups)
 
@@ -837,6 +894,31 @@ don't get lost.
 
 ## Hardware
 
+- ~~**`Camera.__init__` intermittently fails to open the Nexigo webcam on
+  the Q6A.**~~ Resolved 2026-09-12, found live during the first real
+  dashboard test run through the actual `app.py`/`AppConfig` entry point
+  (prior on-device testing all went through hand-written scratch scripts
+  that happened to already hardcode `cv2.CAP_V4L2`, which is presumably
+  why this was never caught before). Plain `cv2.VideoCapture(source)`
+  lets OpenCV auto-select a backend, which on this board sometimes picks
+  GStreamer -- and that GStreamer pipeline intermittently fails to start
+  ("Internal data stream error", "unable to start pipeline") even though
+  the exact same device index opens reliably via the explicit V4L2
+  backend every time it was tried (confirmed with repeated manual
+  `cv2.VideoCapture(0, cv2.CAP_V4L2)` calls -- 100% success -- versus
+  plain `cv2.VideoCapture(0)`, which failed, then succeeded, then failed
+  again across three consecutive attempts seconds apart). Fixed in
+  `capture/camera.py`: force `cv2.CAP_V4L2` for a plain integer device
+  index on Linux specifically (leaving Windows/dev-laptop and GStreamer-
+  pipeline-string sources -- a `source` string is itself a way to pick a
+  backend -- on the previous auto-select behavior, `cv2.CAP_ANY`), plus a
+  one-retry-after-a-short-pause safety net in case even V4L2 hits a
+  transient failure. Unit-tested with `cv2.VideoCapture` mocked
+  (`tests/test_camera.py`, 8 tests) -- real validation is confirming this
+  eliminates the intermittent failure across many real restarts on the
+  physical Q6A, not yet done (the live dashboard test that found this bug
+  is still running on a launcher-level workaround from before the fix
+  landed, to avoid disrupting an in-progress test session).
 - **ArduCam v2 8MP compatibility.** Not yet tested on the Q6A. No matching
   overlay was found in the `radxa-overlays` DKMS package during the Radxa
   Camera 4K investigation (`docs/hardware.md`) -- likely needs its own

@@ -7,13 +7,24 @@ from pose_controller.gestures.types import ArmPose
 from pose_controller.inference.backends._yolo26_detect import Detection
 from pose_controller.inference.pose import PoseResult
 
-# Upper-body-focused skeleton edges (MediaPipe Pose landmark indices).
+# Full-body skeleton edges (MediaPipe Pose landmark indices, matching
+# COCO's own standard skeleton). Every edge here draws only if *both*
+# endpoints are present and visible (see `pixel()` below), so this list
+# doesn't need per-backend variants -- a backend missing some entries
+# (the `qnn` backend's compiled BlazePose model has no leg landmarks at
+# all, see `inference/pose.py`'s `Landmark` docstring) just never draws
+# those specific edges, same mechanism already used for low-visibility
+# keypoints.
 _SKELETON_EDGES = [
+    (0, 2), (0, 5),  # nose to eyes
+    (2, 7), (5, 8),  # eyes to ears
     (11, 12),  # shoulders
     (11, 13), (13, 15),  # left arm
     (12, 14), (14, 16),  # right arm
     (11, 23), (12, 24),  # torso sides
     (23, 24),  # hips
+    (23, 25), (25, 27),  # left leg
+    (24, 26), (26, 28),  # right leg
 ]
 
 _VISIBILITY_THRESHOLD = 0.5
@@ -43,11 +54,16 @@ def draw_poses(
     poses: list[PoseResult],
     arm_states: dict[int, tuple[ArmPose, ArmPose]] | None = None,
 ) -> np.ndarray:
-    """Draw skeleton keypoints/edges for every detected person on top of
-    `frame_bgr` in place, returning it for chaining. Each person's color
-    is keyed by `track_id` (stable across frames once `tracking.Tracker`
-    has assigned one) so identity is visible at a glance, not just
-    position.
+    """Draw a bounding box, full-body skeleton, and keypoint dots for
+    every detected person on top of `frame_bgr` in place, returning it
+    for chaining. Each person's color is keyed by `track_id` (stable
+    across frames once `tracking.Tracker` has assigned one) so identity
+    is visible at a glance, not just position. The box comes from
+    `pose.bbox` (already computed for tracking -- see
+    `inference/pose.py`'s `bbox_from_keypoints`), so it costs nothing
+    extra to draw; how much of the skeleton actually renders depends on
+    which `Landmark`s the active backend fills in (see that enum's
+    docstring -- not every backend covers legs).
 
     `arm_states` (from `gestures.GestureStateMachine.get_arm_states`, keyed
     by track_id) draws each person's current confirmed left/right arm pose
@@ -72,6 +88,10 @@ def _draw_one(
         if kp is None or kp.visibility < _VISIBILITY_THRESHOLD:
             return None
         return int(kp.x * w), int(kp.y * h)
+
+    if pose.bbox is not None:
+        x1, y1, x2, y2 = pose.bbox
+        cv2.rectangle(frame_bgr, (int(x1 * w), int(y1 * h)), (int(x2 * w), int(y2 * h)), color, 1)
 
     for a, b in _SKELETON_EDGES:
         pa, pb = pixel(a), pixel(b)

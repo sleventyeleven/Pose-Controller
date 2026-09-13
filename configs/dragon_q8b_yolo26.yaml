@@ -9,7 +9,7 @@
 # and docs/backlog.md for this alternate pipeline's real-footage
 # validation results (single-person only so far).
 capture:
-  source: "0"  # Nexigo webcam as /dev/video0 once moved over from the Q6A; adjust if other capture devices are present
+  source: "2"  # Nexigo webcam as /dev/video2 -- NOT /dev/video0 like the Q6A, since this board's SoC video codec already occupies indices 0/1 (docs/setup-q8b.md); confirmed by testing device nodes directly, adjust if capture devices change
   width: 1280
   height: 720
   fps: 30

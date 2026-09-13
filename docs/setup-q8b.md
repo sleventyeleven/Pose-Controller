@@ -37,14 +37,20 @@ name:
   set (`qai_hub_models`, `torch`, etc. -- see `docs/backlog.md`'s
   Python-3.13-compatibility notes from the HRNetPose export work, which
   may or may not carry over to 3.14).
-- **No physical camera is attached.** `/dev/video0` and `/dev/video1`
-  exist, but `udevadm info` identifies both as the SoC's Iris
-  hardware video **codec** block (`ID_V4L_PRODUCT=Iris Decoder` /
-  `Iris Encoder` -- encode/decode acceleration, not camera capture), not
-  an actual camera sensor. This confirms there's no camera-related setup
-  work being silently skipped here -- when this board is actually used,
-  the Nexigo USB webcam will need to be physically moved over from the
-  Q6A (plug-and-play UVC, same as on the Q6A -- no driver work expected).
+- ~~**No physical camera is attached.**~~ True as of first bring-up: on
+  `/dev/video0`/`/dev/video1`, `udevadm info` identified both as the
+  SoC's Iris hardware video **codec** block (`ID_V4L_PRODUCT=Iris
+  Decoder`/`Iris Encoder` -- encode/decode acceleration, not camera
+  capture), confirming no camera was silently missed at that point. The
+  Nexigo USB webcam was physically moved over from the Q6A on
+  2026-09-13 (plug-and-play UVC, no driver work needed as expected) --
+  it enumerated as **`/dev/video2`** (new device nodes `/dev/video2`/
+  `/dev/video3`, since indices 0/1 were already taken by the Iris
+  codec), confirmed by testing both new nodes directly rather than
+  assuming index continuity from the Q6A -- `video3` doesn't open at
+  all, `video2` is the real capture device. `configs/dragon_q8b*.yaml`
+  all set `capture.source: "2"` accordingly, not `"0"` like the Q6A's
+  configs.
 
 ## 1. SSH access
 
@@ -184,10 +190,13 @@ Nothing on this hardware remains blocked.
 
 ## Where this leaves the Q8B
 
-Ready for real use: SSH access, idle-suspend fixed, DSP/NPU verified
-working, and this project's existing compiled models confirmed running
-on its actual NPU. The remaining step before a real end-to-end test is
-purely physical -- move the Nexigo webcam over from the Q6A (see
-`docs/backlog.md`). The Radxa Dragon Q6A remains this project's primary,
-documented, maintained pipeline regardless -- the Q8B is a genuine second
-target now, not a replacement for it.
+Fully validated for real use: SSH access, idle-suspend fixed, DSP/NPU
+verified working, this project's compiled models confirmed running on
+its actual NPU, the webcam physically moved over and confirmed on
+`/dev/video2`, and a full live dashboard test (`yolo26`, real webcam,
+re-ID, media control) run end to end -- see `docs/backlog.md` for the
+real FPS/CPU/RAM numbers, and `docs/pipelines.md` for the side-by-side
+comparison against the Q6A (same throughput, less than half the CPU).
+The Radxa Dragon Q6A remains this project's primary, documented,
+maintained pipeline regardless -- the Q8B is a genuine second target,
+not a replacement for it.
