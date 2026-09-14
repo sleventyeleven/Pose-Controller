@@ -63,9 +63,11 @@ and debugging without a manual capture/scp/inspect cycle.
 
 Media control (`control/`) drives a real player via `playerctl` (Linux
 D-Bus MPRIS -- works against Spotify's official Linux client or any
-other MPRIS-compliant player), off by default
-(`control.enabled`) and **not yet validated against a real player or
-real hardware** -- see `docs/backlog.md`. Other known open gaps, also
+other MPRIS-compliant player), off by default (`control.enabled`) and
+**validated end-to-end on the Q8B**: real gesture-triggered
+play/pause/skip/next actions controlling a real, playing Spotify track
+via `spotifyd` (used in place of the official client, which has no
+ARM64 build) -- see `docs/backlog.md` for the setup trail. Other known open gaps, also
 tracked there: the CPU dev backend is still single-person, the re-ID
 threshold's false-merge risk is unvalidated against real multi-person
 footage, some tracking-identity instability may still trace back to

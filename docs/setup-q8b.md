@@ -50,7 +50,13 @@ name:
   assuming index continuity from the Q6A -- `video3` doesn't open at
   all, `video2` is the real capture device. `configs/dragon_q8b*.yaml`
   all set `capture.source: "2"` accordingly, not `"0"` like the Q6A's
-  configs.
+  configs. **This index is not stable across reboots** -- after a
+  reboot on 2026-09-13 the enumeration flipped (webcam at `/dev/video0`/
+  `1`, Iris codec at `2`/`3`), confirmed again via
+  `/sys/class/video4linux/videoN/name` rather than assumed. Check that
+  file after every reboot before trusting a config's `capture.source`;
+  see `docs/backlog.md` for the proper fix (a `udev` rule keyed on the
+  Nexigo's USB IDs instead of a bare index).
 
 ## 1. SSH access
 
@@ -188,15 +194,74 @@ v68 -- the default BlazePose two-stage pipeline, YOLOv8n-det, HRNetPose,
 **zero recompilation**, once the webcam is physically moved over.
 Nothing on this hardware remains blocked.
 
+## 4. Media control: spotifyd as a Spotify Connect endpoint
+
+The official Spotify Linux client has no ARM64/aarch64 build at all
+(amd64/i386 only), so it can't run on this board. Used
+[`spotifyd`](https://github.com/Spotifyd/spotifyd) instead -- an
+open-source daemon that speaks the same Spotify Connect protocol and
+exposes MPRIS over D-Bus, so `control/backends/playerctl.py` needs zero
+changes to talk to it. `spotifyd` has no Bluetooth/BLE support of its
+own (checked its README directly); it's Wi-Fi/LAN zeroconf-based only.
+
+```bash
+# v0.4.2 "full" build (needed for MPRIS -- default/slim omit it)
+wget https://github.com/Spotifyd/spotifyd/releases/download/v0.4.2/spotifyd-linux-aarch64-full.tar.gz
+tar xzf spotifyd-linux-aarch64-full.tar.gz
+```
+
+The prebuilt binary links against OpenSSL 1.1, which this board's
+Ubuntu 26.04 doesn't ship (only OpenSSL 3.5.5, no `libssl1.1` package in
+its own apt repos). Fixed without a system-wide install:
+
+```bash
+wget http://ports.ubuntu.com/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.24_arm64.deb
+dpkg -x libssl1.1_1.1.1f-1ubuntu2.24_arm64.deb ~/libssl1.1_compat/extracted
+```
+
+Modern `spotifyd` has no username/password flags -- authenticate once
+via OAuth (opens a URL the user completes in their own browser; port
+8000 needs forwarding back to a machine with a browser if running
+headless over SSH):
+
+```bash
+LD_LIBRARY_PATH=~/libssl1.1_compat/extracted/usr/lib/aarch64-linux-gnu \
+  ./spotifyd authenticate --oauth-port 8000
+```
+
+Credentials cache under `~/.cache/spotifyd/` and survive reboots, so
+this is a one-time step. Run it:
+
+```bash
+LD_LIBRARY_PATH=~/libssl1.1_compat/extracted/usr/lib/aarch64-linux-gnu \
+  ./spotifyd --no-daemon --backend alsa --use-mpris=true \
+  --dbus-type session --device-name "Pose-Controller-Q8B"
+```
+
+It advertises itself over Spotify Connect once running -- pick it from
+the Connect device list on a phone/laptop and start playback. Its MPRIS
+interface only registers on D-Bus once it becomes the **active**
+playback device, so `playerctl -l` correctly shows nothing until then.
+
+**Validated end-to-end 2026-09-13/14**: real gesture-triggered
+`PLAY_PAUSE`/`SKIP`/`NEXT` actions through the live dashboard controlled
+a real, playing Spotify track for roughly 30 minutes with no crashes.
+See `docs/backlog.md` for the full trail.
+
 ## Where this leaves the Q8B
 
 Fully validated for real use: SSH access, idle-suspend fixed, DSP/NPU
 verified working, this project's compiled models confirmed running on
-its actual NPU, the webcam physically moved over and confirmed on
-`/dev/video2`, and a full live dashboard test (`yolo26`, real webcam,
-re-ID, media control) run end to end -- see `docs/backlog.md` for the
-real FPS/CPU/RAM numbers, and `docs/pipelines.md` for the side-by-side
+its actual NPU, the webcam physically moved over, a full live dashboard
+test (`yolo26`, real webcam, re-ID) run end to end, and media control
+validated against a real Spotify Connect session via `spotifyd` -- see
+`docs/backlog.md` for the real FPS/CPU/RAM numbers and the full media
+control setup trail, and `docs/pipelines.md` for the side-by-side
 comparison against the Q6A (same throughput, less than half the CPU).
-The Radxa Dragon Q6A remains this project's primary, documented,
-maintained pipeline regardless -- the Q8B is a genuine second target,
-not a replacement for it.
+Two open items to watch: the webcam's device index is not stable across
+reboots (re-check `/sys/class/video4linux/videoN/name` after every
+reboot -- see `docs/backlog.md`), and the onboard fan was found not
+spinning after a reboot with no software fan-control interface exposed
+to investigate further. The Radxa Dragon Q6A remains this project's
+primary, documented, maintained pipeline regardless -- the Q8B is a
+genuine second target, not a replacement for it.

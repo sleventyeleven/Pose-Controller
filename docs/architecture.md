@@ -129,22 +129,26 @@ the Q6A:
   reliability is still limited by detection-hit-rate/tracking-continuity
   on harder footage, not the gesture logic itself -- see
   `docs/backlog.md`.
-- **control/** (milestone 6, built 2026-09-12, not yet validated on real
-  hardware) -- `MediaController` abstraction (play/pause/next/previous/
-  volume) that actually carries out a `gestures.ControlAction`, via
-  `dispatch()`. The `playerctl` backend
+- **control/** (milestone 6, built 2026-09-12, **validated end-to-end on
+  real hardware 2026-09-13/14**) -- `MediaController` abstraction
+  (play/pause/next/previous/volume) that actually carries out a
+  `gestures.ControlAction`, via `dispatch()`. The `playerctl` backend
   (`control/backends/playerctl.py`) emulates OS media keys / Linux D-Bus
-  MPRIS against whatever player is already running and authenticated
-  (Spotify's official Linux client, or any other MPRIS-compliant
-  player), which decouples the offline vision pipeline from Spotify's
-  own auth/streaming requirements -- no Spotify-specific code exists
+  MPRIS against whatever player is already running and authenticated,
+  which decouples the offline vision pipeline from Spotify's own
+  auth/streaming requirements -- no Spotify-specific code exists
   anywhere in this module. Off by default (`control.enabled`); degrades
   to a no-op `NullMediaController` if `playerctl` isn't installed,
   matching `build_tracker`'s `ReidEmbedder` fallback pattern. `app.py`
   still prints triggered actions and shows them in the overlay banner
   regardless of whether control is enabled -- that causality display was
-  never conditional on this. See `docs/backlog.md` for what's still
-  unvalidated.
+  never conditional on this. Since the official Spotify Linux client has
+  no ARM64 build, real validation went through `spotifyd` (a
+  Connect-compatible daemon) on the Q8B instead -- confirmed real
+  gestures (`PLAY_PAUSE`/`SKIP`/`NEXT`) driving a real, playing Spotify
+  track via `playerctl`, with zero code changes needed since `control/`
+  never knew or cared which MPRIS player it was talking to. See
+  `docs/backlog.md` for the full setup trail.
 - **overlay/** -- `draw_poses` renders a bounding box, full-body skeleton
   (COCO's own skeleton -- face, arms, torso, legs), track-ID, and each
   person's current confirmed arm states (e.g. "L:- R:OUT"), color-keyed
@@ -181,9 +185,9 @@ the Q6A:
   from YAML (`configs/dev_laptop.yaml` vs `configs/dragon_q6a.yaml`), so
   switching hardware is a config change, not a code change.
 
-Current status: milestones 1-4 are in place (scaffolding, capture + pose
-baseline, multi-person detection + tracking with re-ID, gesture
-recognition). Media control (actually driving Spotify/a player) is not
-yet implemented -- gestures currently only print/display what they'd
-trigger. See `scripts/qnn_spike.md` and `docs/backlog.md` for the
-detailed trail of what it took to get the QNN backend working and fast.
+Current status: milestones 1-6 are in place and validated on real
+hardware (scaffolding, capture + pose baseline, multi-person detection +
+tracking with re-ID, gesture recognition, and media control actually
+driving a real Spotify Connect session end to end). See
+`scripts/qnn_spike.md` and `docs/backlog.md` for the detailed trail of
+what it took to get the QNN backend working and fast.

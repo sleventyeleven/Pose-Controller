@@ -883,17 +883,81 @@ don't get lost.
   - Web dashboard gained a "Media Control" panel (connected/paused/
     playing status dot, now-playing title/artist when available) polled
     via a new `/media` JSON endpoint, `DashboardState.update_media_status`.
-  - **Not yet tested against a real player or real hardware** -- built
-    and unit-tested entirely with `subprocess.run` mocked
-    (`tests/test_control.py`), since the dev machine has no Linux D-Bus
-    session to test against. Real validation (does `playerctl` actually
-    control Spotify on the Q6A/Q8B, does the dashboard panel update
-    correctly, does volume step size feel right) is the real next step,
-    same caveat as every other "built but not yet run on real hardware"
-    item in this document.
+  - ~~**Not yet tested against a real player or real hardware.**~~
+    Resolved 2026-09-13/14 on the Q8B, against a real Spotify Connect
+    session, not just `playerctl` against a stub. Since the official
+    Spotify Linux client has **no ARM64/aarch64 build at all** (verified:
+    amd64/i386 only, a longstanding unaddressed community request), and
+    `spotifyd` has **no Bluetooth/BLE support** (confirmed via its own
+    GitHub README), the path validated here is `spotifyd` v0.4.2
+    (`linux-aarch64-full` prebuilt, chosen over `default`/`slim` for
+    MPRIS) as the local Spotify Connect endpoint, with `playerctl`
+    talking to it over D-Bus exactly as it would to the official client --
+    zero Spotify-specific code anywhere in `control/`.
+    - The prebuilt binary linked against OpenSSL 1.1, which Q8B's Ubuntu
+      26.04 doesn't ship (`libssl.so.1.1: cannot open shared object
+      file`, only OpenSSL 3.5.5 available and no `libssl1.1` package in
+      its own apt repos). Fixed without a system-wide install or
+      touching the real OpenSSL 3 packages: downloaded
+      `libssl1.1_1.1.1f-1ubuntu2.24_arm64.deb` from
+      `ports.ubuntu.com/pool/main/o/openssl/` (the ARM64-specific
+      archive host -- `security.ubuntu.com`/`archive.ubuntu.com` don't
+      carry arm64 packages) and extracted it locally with `dpkg -x` into
+      `~/libssl1.1_compat/`, then ran `spotifyd` with
+      `LD_LIBRARY_PATH` pointed at the extracted `.so`s.
+    - Modern `spotifyd` has no `--username`/`--password` flags at all --
+      auth is OAuth-only via `spotifyd authenticate --oauth-port
+      <PORT>`, which prints an authorization URL for the user to open
+      and complete themselves in their own browser (SSH-port-forwarded
+      back to the board); credentials then cache under
+      `~/.cache/spotifyd/` and survive a reboot, so re-authentication
+      isn't needed on every restart.
+    - Launched with `--backend alsa --use-mpris=true --dbus-type
+      session --device-name "Pose-Controller-Q8B"`, advertised over
+      zeroconf/Spotify Connect. One real quirk worth knowing: its MPRIS
+      interface only registers on D-Bus once it becomes the **active**
+      playback device (i.e. after a phone/laptop picks it from the
+      Connect device list and starts playing) -- `playerctl -l` shows
+      nothing beforehand, which looks like a failure but isn't.
+    - **End-to-end validated live** through the actual dashboard/gesture
+      pipeline against a real playing track ("Pink Pony Club" by
+      Chappell Roan): `PLAY_PAUSE`, `SKIP`, and `NEXT` gestures all
+      dispatched real commands that changed real Spotify Connect
+      playback state, confirmed via both `playerctl -p spotifyd
+      status`/`metadata` and the dashboard's `/media` endpoint tracking
+      the live title/artist. Ran for roughly 30 minutes across 40+
+      track IDs with no crashes or hangs.
+    - **Bluetooth/BLE bridge remains a deferred, separate idea** (`spotifyd`
+      itself has no Bluetooth support at all) -- noted here for later,
+      not scheduled.
 
 ## Hardware
 
+- **Q8B webcam device index is not stable across reboots.** First bring-up
+  (2026-09-13) found the Nexigo webcam at `/dev/video2`, with the SoC's
+  Iris video codec occupying `/dev/video0`/`/dev/video1` -- all three
+  `configs/dragon_q8b*.yaml` were set to `source: "2"` accordingly. After
+  a reboot the next day, the enumeration order flipped: the webcam came
+  up as `/dev/video0`/`/dev/video1` and the Iris codec landed on
+  `/dev/video2`/`/dev/video3` instead, confirmed by reading
+  `/sys/class/video4linux/videoN/name` directly rather than assuming
+  index continuity -- the deployed dashboard config had to be hand-edited
+  back to `source: "0"` to recover. Root cause is USB vs. platform-device
+  probe-order timing at boot, which isn't guaranteed stable on this
+  board. **Not yet fixed properly** -- the real fix is matching by device
+  name/`udev` rule (e.g. a persistent symlink keyed on the Nexigo's
+  USB vendor/product ID) instead of a bare index, so the committed
+  configs stop silently going stale across reboots. Low priority since
+  it only affects the Q8B (the Q6A has a single camera and no competing
+  codec device), but worth doing before this board is used unattended.
+- **Q8B onboard fan not spinning** (noticed 2026-09-13 after a manual
+  attempt to fix HDMI audio required a reboot). No PWM/tach control is
+  exposed anywhere under `/sys/class/hwmon/*` on this board (checked all
+  65 `hwmon` entries), so there's no software angle to investigate this
+  further -- it's a physical connector/wiring check. Thermal zones read
+  normal (mid-50s C) at idle; not yet observed under sustained inference
+  load with the fan confirmed absent. Worth watching for thermal
+  throttling on longer test sessions until the fan itself is checked.
 - ~~**`Camera.__init__` intermittently fails to open the Nexigo webcam on
   the Q6A.**~~ Resolved 2026-09-12, found live during the first real
   dashboard test run through the actual `app.py`/`AppConfig` entry point
